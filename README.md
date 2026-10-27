@@ -9,10 +9,10 @@ Production-quality [Eclipse Sparkplug B 3.0.0](https://sparkplug.eclipse.org/spe
 [![Go Reference](https://pkg.go.dev/badge/github.com/otfabric/go-sparkplugb.svg)](https://pkg.go.dev/github.com/otfabric/go-sparkplugb)
 [![Release](https://img.shields.io/github/v/release/otfabric/go-sparkplugb?include_prereleases)](https://github.com/otfabric/go-sparkplugb/releases)
 
-go-sparkplugb handles the full Sparkplug B 3.0.0 protocol lifecycle for both
-Edge Nodes and Host Applications: topic namespace, Protobuf codecs, typed
-metrics (including arrays, templates and datasets), sequence numbering, alias
-management, birth/death certificates, primary host awareness with server
+go-sparkplugb handles the full Sparkplug B 3.0.0 protocol lifecycle for Edge
+Nodes, Host Applications and Applications: topic namespace, Protobuf codecs,
+typed metrics (including arrays, templates and datasets), sequence numbering,
+alias management, birth/death certificates, primary host awareness with server
 walking, and message reordering. Plug in any MQTT 3.1.1 or 5.0 client through
 the transport interface.
 
@@ -20,6 +20,7 @@ the transport interface.
 [Install](#installation) ·
 [Edge Node](#quick-start--edge-node) ·
 [Host Application](#quick-start--host-application) ·
+[Application](#quick-start--application) ·
 [Packages](#packages) ·
 [Examples](#examples) ·
 [Conformance](#specification-conformance) ·
@@ -33,6 +34,7 @@ the transport interface.
 |----------|---------|
 | **Edge Node runtime** | Full lifecycle (birth/death/rebirth), sequence numbering, alias support, primary host awareness, server walking across multiple brokers |
 | **Host Application runtime** | STATE birth/death certificates, node/device registry, sequence validation, automatic rebirth requests, message reordering timeout |
+| **Application runtime** | Non-primary-host consumer: subscribes to spBv1.0/#, tracks nodes/devices, alias resolution, sends NCMD/DCMD — no STATE messages |
 | **Typed metric codec** | All scalar types, signed-integer handling (Int8–Int64 in wire fields), all array types (little-endian packed, bit-packed BooleanArray, null-terminated StringArray, DateTimeArray), quality codes |
 | **Templates** | Template definitions (is_definition, version, member metrics, parameters) and instances (template_ref, parameter overrides) |
 | **DataSets** | Columnar data with typed columns (num_of_columns, columns, types, rows), round-trip encode/decode |
@@ -57,6 +59,7 @@ Requires Go 1.24 or later.
 | `payload` | `github.com/otfabric/go-sparkplugb/payload` | Typed metric encoding/decoding, templates, datasets, arrays, quality codes |
 | `edge` | `github.com/otfabric/go-sparkplugb/edge` | Edge Node runtime (lifecycle, sequencing, aliases, server walking) |
 | `host` | `github.com/otfabric/go-sparkplugb/host` | Host Application runtime (STATE, registry, seq validation, reorder timeout) |
+| `app` | `github.com/otfabric/go-sparkplugb/app` | Application runtime (subscriber, node tracking, commands — no STATE) |
 | `mqtt` | `github.com/otfabric/go-sparkplugb/mqtt` | MQTT transport interface and Paho adapter |
 
 ---
@@ -116,6 +119,34 @@ app.Connect(ctx)
 defer app.Close(ctx)
 ```
 
+## Quick Start — Application
+
+An Application subscribes to the Sparkplug namespace and tracks edge
+nodes/devices without publishing STATE birth/death certificates. Use it for
+dashboards, loggers, analytics pipelines, or any consumer that does not need
+to be a Primary Host.
+
+```go
+application, _ := app.New(transport, app.Config{
+    BrokerURL: "tcp://broker:1883",
+    OnNodeBirth: func(group, node string, metrics []*pb.Payload_Metric) {
+        log.Printf("node online: %s/%s with %d metrics", group, node, len(metrics))
+    },
+    OnNodeData: func(group, node string, metrics []*pb.Payload_Metric) {
+        log.Printf("data from %s/%s: %d metrics", group, node, len(metrics))
+    },
+    OnNodeDeath: func(group, node string) {
+        log.Printf("node offline: %s/%s", group, node)
+    },
+})
+
+application.Connect(ctx)
+defer application.Close(ctx)
+
+// Send a command to an edge node
+application.SendNodeCommand(ctx, "plant", "gw1", []*pb.Payload_Metric{rebirth})
+```
+
 ## Quick Start — Templates
 
 ```go
@@ -164,6 +195,7 @@ Runnable examples are in the [`examples/`](examples/) directory:
 | [`examples/host-app`](examples/host-app) | Host Application with node/device lifecycle callbacks |
 | [`examples/templates`](examples/templates) | Template definitions and instances with parameter overrides |
 | [`examples/datasets`](examples/datasets) | DataSet metrics with typed columnar data |
+| [`examples/application`](examples/application) | Application (non-host subscriber) with node/device event tracking |
 | [`examples/server-walking`](examples/server-walking) | Edge Node with multi-broker ServerURLs and primary host awareness |
 
 Run any example with:
@@ -206,6 +238,21 @@ MQTT_BROKER=tcp://localhost:1883 go run ./examples/edge-node
 | `OnNodeDeath` | `func` | | NDEATH callback |
 | `OnDeviceDeath` | `func` | | DDEATH callback |
 
+### Application Config
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `BrokerURL` | `string` | | MQTT broker URL |
+| `ServerURLs` | `[]string` | | Multiple broker URLs (fallback) |
+| `ClientID` | `string` | auto | MQTT client ID |
+| `OnState` | `func` | | State change callback |
+| `OnNodeBirth` | `func` | | NBIRTH callback |
+| `OnDeviceBirth` | `func` | | DBIRTH callback |
+| `OnNodeData` | `func` | | NDATA callback |
+| `OnDeviceData` | `func` | | DDATA callback |
+| `OnNodeDeath` | `func` | | NDEATH callback |
+| `OnDeviceDeath` | `func` | | DDEATH callback |
+
 ---
 
 ## Specification Conformance
@@ -220,6 +267,7 @@ clause-by-clause requirements matrix.
 |---------|-----------|----------|
 | Edge Node | Session, Termination, Data, Commands, Primary Host, Multi-Broker | Aliases, Templates, DataSets, Properties |
 | Host Application | Session, Termination, Commands, Edge Termination | Message Reordering |
+| Application | Subscribe, Track State, Alias Resolution, Seq Validation, Commands | — |
 
 ---
 
@@ -232,11 +280,13 @@ go-sparkplugb
 ├── payload/          Typed metric codec, templates, datasets, arrays
 ├── edge/             Edge Node runtime
 ├── host/             Host Application runtime
+├── app/              Application runtime (non-host consumer)
 ├── mqtt/             MQTT transport interface and Paho adapter
 ├── examples/
 │   ├── edge-node/        Edge Node lifecycle
 │   ├── host-app/         Host Application lifecycle
 │   ├── templates/        Template definitions and instances
+│   ├── application/      Application (non-host consumer)
 │   ├── datasets/         DataSet columnar metrics
 │   └── server-walking/   Multi-broker server walking
 └── docs/

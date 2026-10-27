@@ -230,3 +230,14 @@ applicable (broker or server requirement).
 | Group | Status |
 |-------|--------|
 | Message Reordering | Y |
+
+### Sparkplug Application (non-host consumer)
+
+| Group | Status |
+|-------|--------|
+| Subscribe to spBv1.0/# | Y |
+| Track Node/Device state | Y |
+| Alias resolution | Y |
+| Sequence validation | Y |
+| Send NCMD/DCMD | Y |
+| No STATE birth/death | Y |
