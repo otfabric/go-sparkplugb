@@ -76,7 +76,7 @@ applicable (broker or server requirement).
 | Requirement | TCK ID | Status | Notes |
 |------------|--------|--------|-------|
 | Handle NCMD with Node Control/Rebirth=true | tck-id-message-flow-edge-node-rebirth-action | Y | Sets born=false |
-| On rebirth: re-publish NBIRTH + all DBIRTHs | tck-id-message-flow-edge-node-rebirth-publish | P | App must re-call PublishBirth |
+| On rebirth: re-publish NBIRTH + all DBIRTHs | tck-id-message-flow-edge-node-rebirth-publish | Y | Auto-rebirth via Rebirth() |
 
 ### Host Application Session Establishment
 
@@ -104,7 +104,7 @@ applicable (broker or server requirement).
 | Track online/offline state of all Edge Nodes | tck-id-host-topic-phid-state-tracking | Y | |
 | Validate seq ordering per Edge Node | tck-id-host-topic-phid-seq-validation | Y | |
 | On seq gap: request rebirth via NCMD | tck-id-host-topic-phid-seq-rebirth | Y | |
-| Mark metrics STALE on NDEATH/DDEATH | tck-id-host-topic-phid-stale-metrics | N | Not yet implemented |
+| Mark metrics STALE on NDEATH/DDEATH | tck-id-host-topic-phid-stale-metrics | Y | Stale flag on EdgeNodeState/DeviceState |
 | Message reordering timeout (optional) | tck-id-host-topic-phid-reorder | N | Config placeholder only |
 
 ### Primary Host Behavior
@@ -124,8 +124,8 @@ applicable (broker or server requirement).
 | Requirement | TCK ID | Status | Notes |
 |------------|--------|--------|-------|
 | Metric name in BIRTH only | — | P | Not enforced by library |
-| Metric alias in BIRTH and DATA | — | N | Alias resolution not yet |
-| Alias unique across entire Edge Node | — | N | Alias tracking not yet |
+| Metric alias in BIRTH and DATA | — | Y | Edge tracks, Host resolves |
+| Alias unique across entire Edge Node | — | Y | Edge alias map, Host alias map |
 | DataType field set on every metric | — | Y | payload package |
 | Timestamp on every metric | — | P | Payload-level only |
 | is_null for null values | — | Y | payload package |

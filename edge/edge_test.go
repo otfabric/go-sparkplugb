@@ -8,6 +8,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/otfabric/go-sparkplugb/mqtt"
 	"github.com/otfabric/go-sparkplugb/payload"
@@ -324,6 +325,8 @@ func TestRebirthCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	beforeCount := len(tr.getPublished())
+
 	rebirthPayload := &pb.Payload{
 		Metrics: []*pb.Payload_Metric{payload.RebirthMetric(true)},
 	}
@@ -332,11 +335,79 @@ func TestRebirthCommand(t *testing.T) {
 	ncmdTopic := topic.ForNCMD("testGroup", "testNode")
 	tr.deliver(ncmdTopic, b)
 
-	n.mu.Lock()
-	born := n.born
-	n.mu.Unlock()
-	if born {
-		t.Error("born should be false after rebirth command")
+	// Auto-rebirth runs in a goroutine; wait briefly for it to complete
+	for i := 0; i < 50; i++ {
+		msgs := tr.getPublished()
+		if len(msgs) > beforeCount {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	msgs := tr.getPublished()
+	if len(msgs) <= beforeCount {
+		t.Fatal("expected auto-rebirth to publish NBIRTH")
+	}
+	rebirthMsg := msgs[beforeCount]
+	if rebirthMsg.Topic != "spBv1.0/testGroup/NBIRTH/testNode" {
+		t.Errorf("rebirth topic = %q, want NBIRTH", rebirthMsg.Topic)
+	}
+	p, _ := payload.Decode(rebirthMsg.Payload)
+	if p.GetSeq() != 0 {
+		t.Errorf("rebirth seq = %d, want 0", p.GetSeq())
+	}
+}
+
+func TestRebirthWithDevices(t *testing.T) {
+	tr := newMockTransport()
+	n, err := New(tr, testConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	if err := n.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	m, _ := payload.NewMetric("x", pb.DataType_Int32, int32(0))
+	if err := n.PublishBirth(ctx, []*pb.Payload_Metric{m}); err != nil {
+		t.Fatal(err)
+	}
+
+	dm, _ := payload.NewMetric("y", pb.DataType_Int32, int32(1))
+	if err := n.PublishDeviceBirth(ctx, "dev1", []*pb.Payload_Metric{dm}); err != nil {
+		t.Fatal(err)
+	}
+
+	beforeCount := len(tr.getPublished())
+
+	if err := n.Rebirth(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	msgs := tr.getPublished()
+	rebirthMsgs := msgs[beforeCount:]
+	if len(rebirthMsgs) < 2 {
+		t.Fatalf("expected at least 2 rebirth messages (NBIRTH + DBIRTH), got %d", len(rebirthMsgs))
+	}
+	if rebirthMsgs[0].Topic != "spBv1.0/testGroup/NBIRTH/testNode" {
+		t.Errorf("first rebirth msg topic = %q, want NBIRTH", rebirthMsgs[0].Topic)
+	}
+	if rebirthMsgs[1].Topic != "spBv1.0/testGroup/DBIRTH/testNode/dev1" {
+		t.Errorf("second rebirth msg topic = %q, want DBIRTH/dev1", rebirthMsgs[1].Topic)
+	}
+}
+
+func TestRebirthNotOnline(t *testing.T) {
+	tr := newMockTransport()
+	n, err := New(tr, testConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = n.Rebirth(context.Background())
+	if !errors.Is(err, ErrNotConnected) {
+		t.Errorf("expected ErrNotConnected, got %v", err)
 	}
 }
 
@@ -1035,6 +1106,73 @@ func (l *testLogger) Debugf(format string, args ...any) {}
 func (l *testLogger) Infof(format string, args ...any)  {}
 func (l *testLogger) Warnf(format string, args ...any)  {}
 func (l *testLogger) Errorf(format string, args ...any) {}
+
+func TestAliasTracking(t *testing.T) {
+	tr := newMockTransport()
+	n, err := New(tr, testConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := n.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	alias := uint64(1)
+	m := &pb.Payload_Metric{
+		Name:     strPtr("temperature"),
+		Alias:    &alias,
+		Datatype: dtPtr(pb.DataType_Double),
+	}
+	if err := n.PublishBirth(ctx, []*pb.Payload_Metric{m}); err != nil {
+		t.Fatal(err)
+	}
+
+	name, ok := n.ResolveAlias(1)
+	if !ok || name != "temperature" {
+		t.Errorf("ResolveAlias(1) = %q, %v; want temperature, true", name, ok)
+	}
+
+	_, ok = n.ResolveAlias(999)
+	if ok {
+		t.Error("expected unknown alias to return false")
+	}
+}
+
+func TestDeviceAliasTracking(t *testing.T) {
+	tr := newMockTransport()
+	n, err := New(tr, testConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := n.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	m, _ := payload.NewMetric("x", pb.DataType_Int32, int32(0))
+	if err := n.PublishBirth(ctx, []*pb.Payload_Metric{m}); err != nil {
+		t.Fatal(err)
+	}
+
+	alias := uint64(10)
+	dm := &pb.Payload_Metric{
+		Name:     strPtr("sensor"),
+		Alias:    &alias,
+		Datatype: dtPtr(pb.DataType_Float),
+	}
+	if err := n.PublishDeviceBirth(ctx, "dev1", []*pb.Payload_Metric{dm}); err != nil {
+		t.Fatal(err)
+	}
+
+	name, ok := n.ResolveAlias(10)
+	if !ok || name != "sensor" {
+		t.Errorf("ResolveAlias(10) = %q, %v; want sensor, true", name, ok)
+	}
+}
+
+func strPtr(s string) *string  { return &s }
+func dtPtr(dt pb.DataType) *uint32 { v := uint32(dt); return &v }
 
 func TestDeviceDeathUnknownDevice(t *testing.T) {
 	tr := newMockTransport()

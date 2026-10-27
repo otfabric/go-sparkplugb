@@ -7,6 +7,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/otfabric/go-sparkplugb/mqtt"
 	"github.com/otfabric/go-sparkplugb/payload"
@@ -816,4 +817,211 @@ func TestHostDeviceDeath(t *testing.T) {
 	if ds.Online {
 		t.Error("device should be offline after DDEATH")
 	}
+	if !ds.Stale {
+		t.Error("device metrics should be stale after DDEATH")
+	}
 }
+
+func TestHostStaleOnNDEATH(t *testing.T) {
+	tr := newMockTransport()
+	app, _ := New(tr, testConfig())
+	ctx := context.Background()
+	_ = app.Connect(ctx)
+
+	bdSeq := payload.BdSeqMetric(5)
+	p := payload.NewPayload(0, bdSeq)
+	b, _ := payload.Encode(p)
+	tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NBIRTH, EdgeNodeID: "n1"}.String(), b)
+
+	ns := app.GetNode("g1", "n1")
+	if ns.Stale {
+		t.Error("should not be stale after birth")
+	}
+
+	deathP := &pb.Payload{Metrics: []*pb.Payload_Metric{payload.BdSeqMetric(5)}}
+	ts := uint64(0)
+	deathP.Timestamp = &ts
+	db, _ := payload.Encode(deathP)
+	tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NDEATH, EdgeNodeID: "n1"}.String(), db)
+
+	ns = app.GetNode("g1", "n1")
+	if !ns.Stale {
+		t.Error("node metrics should be stale after NDEATH")
+	}
+}
+
+func TestHostStaleClearedOnRebirth(t *testing.T) {
+	tr := newMockTransport()
+	app, _ := New(tr, testConfig())
+	ctx := context.Background()
+	_ = app.Connect(ctx)
+
+	// First birth
+	bdSeq := payload.BdSeqMetric(5)
+	p := payload.NewPayload(0, bdSeq)
+	b, _ := payload.Encode(p)
+	tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NBIRTH, EdgeNodeID: "n1"}.String(), b)
+
+	// Death
+	deathP := &pb.Payload{Metrics: []*pb.Payload_Metric{payload.BdSeqMetric(5)}}
+	ts := uint64(0)
+	deathP.Timestamp = &ts
+	db, _ := payload.Encode(deathP)
+	tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NDEATH, EdgeNodeID: "n1"}.String(), db)
+
+	// Rebirth
+	bdSeq2 := payload.BdSeqMetric(6)
+	p2 := payload.NewPayload(0, bdSeq2)
+	b2, _ := payload.Encode(p2)
+	tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NBIRTH, EdgeNodeID: "n1"}.String(), b2)
+
+	ns := app.GetNode("g1", "n1")
+	if ns.Stale {
+		t.Error("stale should be cleared after rebirth")
+	}
+}
+
+func TestHostAliasResolution(t *testing.T) {
+	tr := newMockTransport()
+	app, _ := New(tr, testConfig())
+	ctx := context.Background()
+	_ = app.Connect(ctx)
+
+	// NBIRTH with alias
+	alias := uint64(1)
+	m := &pb.Payload_Metric{
+		Name:     strPtr("temperature"),
+		Alias:    &alias,
+		Datatype: dtPtr(pb.DataType_Double),
+	}
+	bdSeq := payload.BdSeqMetric(0)
+	seq := uint64(0)
+	p := &pb.Payload{
+		Seq:     &seq,
+		Metrics: []*pb.Payload_Metric{bdSeq, m},
+	}
+	tsVal := uint64(time.Now().UnixMilli())
+	p.Timestamp = &tsVal
+	b, _ := payload.Encode(p)
+	tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NBIRTH, EdgeNodeID: "n1"}.String(), b)
+
+	// Resolve alias
+	name, ok := app.ResolveAlias("g1", "n1", 1)
+	if !ok || name != "temperature" {
+		t.Errorf("ResolveAlias = %q, %v; want temperature, true", name, ok)
+	}
+
+	// Unknown alias
+	_, ok = app.ResolveAlias("g1", "n1", 999)
+	if ok {
+		t.Error("expected false for unknown alias")
+	}
+
+	// Unknown node
+	_, ok = app.ResolveAlias("g1", "unknown", 1)
+	if ok {
+		t.Error("expected false for unknown node")
+	}
+}
+
+func TestHostNDATAAliasResolution(t *testing.T) {
+	tr := newMockTransport()
+	app, _ := New(tr, testConfig())
+	ctx := context.Background()
+	_ = app.Connect(ctx)
+
+	// NBIRTH with alias
+	alias := uint64(1)
+	m := &pb.Payload_Metric{
+		Name:     strPtr("temperature"),
+		Alias:    &alias,
+		Datatype: dtPtr(pb.DataType_Double),
+	}
+	bdSeq := payload.BdSeqMetric(0)
+	seq := uint64(0)
+	p := &pb.Payload{
+		Seq:     &seq,
+		Metrics: []*pb.Payload_Metric{bdSeq, m},
+	}
+	tsVal := uint64(time.Now().UnixMilli())
+	p.Timestamp = &tsVal
+	b, _ := payload.Encode(p)
+	tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NBIRTH, EdgeNodeID: "n1"}.String(), b)
+
+	// NDATA with alias only (no name) — should resolve and update metric
+	dataAlias := uint64(1)
+	dm := &pb.Payload_Metric{
+		Alias:    &dataAlias,
+		Datatype: dtPtr(pb.DataType_Double),
+	}
+	payload.SetValue(dm, pb.DataType_Double, float64(25.0))
+	seq1 := uint64(1)
+	dp := &pb.Payload{Seq: &seq1, Metrics: []*pb.Payload_Metric{dm}}
+	dp.Timestamp = &tsVal
+	db, _ := payload.Encode(dp)
+	tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NDATA, EdgeNodeID: "n1"}.String(), db)
+
+	ns := app.GetNode("g1", "n1")
+	if tm, ok := ns.Metrics["temperature"]; !ok {
+		t.Error("temperature metric not found after alias-based NDATA")
+	} else if tm.GetDoubleValue() != 25.0 {
+		t.Errorf("temperature = %f, want 25.0", tm.GetDoubleValue())
+	}
+}
+
+func TestHostDeviceAliasResolution(t *testing.T) {
+	tr := newMockTransport()
+	app, _ := New(tr, testConfig())
+	ctx := context.Background()
+	_ = app.Connect(ctx)
+
+	// NBIRTH
+	bdSeq := payload.BdSeqMetric(0)
+	p := payload.NewPayload(0, bdSeq)
+	b, _ := payload.Encode(p)
+	tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NBIRTH, EdgeNodeID: "n1"}.String(), b)
+
+	// DBIRTH with alias
+	alias := uint64(10)
+	dm := &pb.Payload_Metric{
+		Name:     strPtr("rpm"),
+		Alias:    &alias,
+		Datatype: dtPtr(pb.DataType_UInt32),
+	}
+	seq1 := uint64(1)
+	dp := &pb.Payload{Seq: &seq1, Metrics: []*pb.Payload_Metric{dm}}
+	tsVal := uint64(time.Now().UnixMilli())
+	dp.Timestamp = &tsVal
+	db, _ := payload.Encode(dp)
+	tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.DBIRTH, EdgeNodeID: "n1", DeviceID: "d1"}.String(), db)
+
+	// Resolve via node
+	name, ok := app.ResolveAlias("g1", "n1", 10)
+	if !ok || name != "rpm" {
+		t.Errorf("ResolveAlias = %q, %v; want rpm, true", name, ok)
+	}
+
+	// DDATA with alias only
+	dataAlias := uint64(10)
+	ddm := &pb.Payload_Metric{
+		Alias:    &dataAlias,
+		Datatype: dtPtr(pb.DataType_UInt32),
+	}
+	payload.SetValue(ddm, pb.DataType_UInt32, uint32(3000))
+	seq2 := uint64(2)
+	ddp := &pb.Payload{Seq: &seq2, Metrics: []*pb.Payload_Metric{ddm}}
+	ddp.Timestamp = &tsVal
+	ddb, _ := payload.Encode(ddp)
+	tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.DDATA, EdgeNodeID: "n1", DeviceID: "d1"}.String(), ddb)
+
+	ns := app.GetNode("g1", "n1")
+	ds := ns.Devices["d1"]
+	if m, ok := ds.Metrics["rpm"]; !ok {
+		t.Error("rpm metric not found after alias-based DDATA")
+	} else if m.GetIntValue() != 3000 {
+		t.Errorf("rpm = %d, want 3000", m.GetIntValue())
+	}
+}
+
+func strPtr(s string) *string       { return &s }
+func dtPtr(dt pb.DataType) *uint32   { v := uint32(dt); return &v }

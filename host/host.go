@@ -78,12 +78,16 @@ type EdgeNodeState struct {
 	LastSeq    uint64
 	Metrics    map[string]*pb.Payload_Metric
 	Devices    map[string]*DeviceState
+	Aliases    map[uint64]string // alias -> metric name
+	Stale      bool
 }
 
 type DeviceState struct {
 	DeviceID string
 	Online   bool
 	Metrics  map[string]*pb.Payload_Metric
+	Aliases  map[uint64]string
+	Stale    bool
 }
 
 type App struct {
@@ -278,6 +282,25 @@ func (a *App) State() State {
 	return a.state
 }
 
+// ResolveAlias resolves a metric alias for a given edge node.
+func (a *App) ResolveAlias(groupID, nodeID string, alias uint64) (string, bool) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	ns := a.nodes[nodeKey(groupID, nodeID)]
+	if ns == nil {
+		return "", false
+	}
+	if name, ok := ns.Aliases[alias]; ok {
+		return name, true
+	}
+	for _, ds := range ns.Devices {
+		if name, ok := ds.Aliases[alias]; ok {
+			return name, true
+		}
+	}
+	return "", false
+}
+
 func (a *App) setState(s State) {
 	old := a.state
 	a.state = s
@@ -334,12 +357,16 @@ func (a *App) handleNBIRTH(t topic.Topic, data []byte) {
 		LastSeq:    p.GetSeq(),
 		Metrics:    make(map[string]*pb.Payload_Metric),
 		Devices:    make(map[string]*DeviceState),
+		Aliases:    make(map[uint64]string),
 	}
 	for _, m := range p.Metrics {
 		if m.GetName() == "bdSeq" {
 			ns.BdSeq = m.GetLongValue()
 		} else {
 			ns.Metrics[m.GetName()] = m
+			if m.Alias != nil {
+				ns.Aliases[m.GetAlias()] = m.GetName()
+			}
 		}
 	}
 	a.nodes[key] = ns
@@ -372,8 +399,10 @@ func (a *App) handleNDEATH(t topic.Topic, data []byte) {
 			}
 		}
 		ns.Online = false
+		ns.Stale = true
 		for _, dev := range ns.Devices {
 			dev.Online = false
+			dev.Stale = true
 		}
 	}
 	a.mu.Unlock()
@@ -401,9 +430,13 @@ func (a *App) handleDBIRTH(t topic.Topic, data []byte) {
 			DeviceID: t.DeviceID,
 			Online:   true,
 			Metrics:  make(map[string]*pb.Payload_Metric),
+			Aliases:  make(map[uint64]string),
 		}
 		for _, m := range p.Metrics {
 			ds.Metrics[m.GetName()] = m
+			if m.Alias != nil {
+				ds.Aliases[m.GetAlias()] = m.GetName()
+			}
 		}
 		ns.Devices[t.DeviceID] = ds
 	}
@@ -430,6 +463,7 @@ func (a *App) handleDDEATH(t topic.Topic, data []byte) {
 		}
 		if ds, ok := ns.Devices[t.DeviceID]; ok {
 			ds.Online = false
+			ds.Stale = true
 		}
 	}
 	a.mu.Unlock()
@@ -454,7 +488,7 @@ func (a *App) handleNDATA(t topic.Topic, data []byte) {
 			return
 		}
 		for _, m := range p.Metrics {
-			name := m.GetName()
+			name := a.resolveMetricName(ns, m)
 			if name != "" {
 				ns.Metrics[name] = m
 			}
@@ -483,7 +517,7 @@ func (a *App) handleDDATA(t topic.Topic, data []byte) {
 		}
 		if ds, ok := ns.Devices[t.DeviceID]; ok {
 			for _, m := range p.Metrics {
-				name := m.GetName()
+				name := a.resolveDeviceMetricName(ds, m)
 				if name != "" {
 					ds.Metrics[name] = m
 				}
@@ -495,6 +529,32 @@ func (a *App) handleDDATA(t topic.Topic, data []byte) {
 	if a.cfg.OnDeviceData != nil {
 		a.cfg.OnDeviceData(t.GroupID, t.EdgeNodeID, t.DeviceID, p.Metrics)
 	}
+}
+
+// resolveMetricName returns the metric name, resolving alias if needed.
+func (a *App) resolveMetricName(ns *EdgeNodeState, m *pb.Payload_Metric) string {
+	if name := m.GetName(); name != "" {
+		return name
+	}
+	if m.Alias != nil {
+		if name, ok := ns.Aliases[m.GetAlias()]; ok {
+			return name
+		}
+	}
+	return ""
+}
+
+// resolveDeviceMetricName returns the metric name, resolving alias if needed.
+func (a *App) resolveDeviceMetricName(ds *DeviceState, m *pb.Payload_Metric) string {
+	if name := m.GetName(); name != "" {
+		return name
+	}
+	if m.Alias != nil {
+		if name, ok := ds.Aliases[m.GetAlias()]; ok {
+			return name
+		}
+	}
+	return ""
 }
 
 func (a *App) validateSeq(ns *EdgeNodeState, seq uint64, t topic.Topic) bool {

@@ -112,8 +112,11 @@ type Node struct {
 	gen     uint64 // connection generation; prevents stale callbacks
 	closeCh chan struct{}
 
-	rebirthOnce sync.Once
-	rebirthMu   sync.Mutex
+	// Birth state for auto-rebirth
+	birthMetrics []*pb.Payload_Metric
+
+	rebirthMu      sync.Mutex
+	rebirthPending bool
 }
 
 type Device struct {
@@ -250,8 +253,19 @@ func (n *Node) PublishBirth(ctx context.Context, nodeMetrics []*pb.Payload_Metri
 	}
 	n.seq = 0
 	n.born = true
-	n.aliases = make(map[uint64]string) // reset aliases on birth
-	n.rebirthOnce = sync.Once{}         // reset rebirth coalescing
+	n.aliases = make(map[uint64]string)
+
+	// Store birth metrics for auto-rebirth
+	n.birthMetrics = make([]*pb.Payload_Metric, len(nodeMetrics))
+	copy(n.birthMetrics, nodeMetrics)
+
+	// Register aliases from birth metrics
+	for _, m := range nodeMetrics {
+		if m.Alias != nil {
+			n.aliases[m.GetAlias()] = m.GetName()
+		}
+	}
+
 	seq := n.seq
 	bdSeq := n.bdSeq
 	n.mu.Unlock()
@@ -274,8 +288,16 @@ func (n *Node) PublishDeviceBirth(ctx context.Context, deviceID string, metrics 
 	if _, exists := n.devices[deviceID]; !exists {
 		n.devices[deviceID] = &Device{ID: deviceID}
 	}
-	n.devices[deviceID].Metrics = metrics
+	n.devices[deviceID].Metrics = make([]*pb.Payload_Metric, len(metrics))
+	copy(n.devices[deviceID].Metrics, metrics)
 	n.devices[deviceID].Online = true
+
+	// Register aliases from device birth metrics
+	for _, m := range metrics {
+		if m.Alias != nil {
+			n.aliases[m.GetAlias()] = m.GetName()
+		}
+	}
 
 	n.seq = (n.seq + 1) % 256
 	seq := n.seq
@@ -330,6 +352,35 @@ func (n *Node) PublishDeviceDeath(ctx context.Context, deviceID string) error {
 	return n.publish(ctx, topic.DDEATH, deviceID, p)
 }
 
+// Rebirth re-publishes the full birth sequence: NBIRTH followed by DBIRTH
+// for each online device. It resets the sequence counter per the spec.
+func (n *Node) Rebirth(ctx context.Context) error {
+	n.mu.Lock()
+	if n.state != Online {
+		n.mu.Unlock()
+		return ErrNotConnected
+	}
+	birthMetrics := n.birthMetrics
+	devices := make(map[string]*Device, len(n.devices))
+	for k, v := range n.devices {
+		devices[k] = v
+	}
+	n.mu.Unlock()
+
+	if err := n.PublishBirth(ctx, birthMetrics); err != nil {
+		return fmt.Errorf("sparkplugb: rebirth NBIRTH: %w", err)
+	}
+
+	for id, dev := range devices {
+		if dev.Online {
+			if err := n.PublishDeviceBirth(ctx, id, dev.Metrics); err != nil {
+				return fmt.Errorf("sparkplugb: rebirth DBIRTH %s: %w", id, err)
+			}
+		}
+	}
+	return nil
+}
+
 func (n *Node) Disconnect(ctx context.Context) error {
 	n.mu.Lock()
 	if n.state == Closed || n.state == Disconnected {
@@ -352,6 +403,7 @@ func (n *Node) Disconnect(ctx context.Context) error {
 		}
 	}
 	n.born = false
+	n.birthMetrics = nil
 	n.setState(Disconnected)
 	n.mu.Unlock()
 
@@ -390,6 +442,14 @@ func (n *Node) Seq() uint64 {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return n.seq
+}
+
+// ResolveAlias returns the metric name for a given alias, if registered.
+func (n *Node) ResolveAlias(alias uint64) (string, bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	name, ok := n.aliases[alias]
+	return name, ok
 }
 
 func (n *Node) setState(s State) {
@@ -484,9 +544,23 @@ func (n *Node) handleNCMD(p *pb.Payload) {
 			if n.cfg.Logger != nil {
 				n.cfg.Logger.Infof("rebirth requested")
 			}
-			n.mu.Lock()
-			n.born = false
-			n.mu.Unlock()
+			n.rebirthMu.Lock()
+			if !n.rebirthPending {
+				n.rebirthPending = true
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					if err := n.Rebirth(ctx); err != nil {
+						if n.cfg.Logger != nil {
+							n.cfg.Logger.Errorf("auto-rebirth failed: %v", err)
+						}
+					}
+					n.rebirthMu.Lock()
+					n.rebirthPending = false
+					n.rebirthMu.Unlock()
+				}()
+			}
+			n.rebirthMu.Unlock()
 			return
 		}
 	}
