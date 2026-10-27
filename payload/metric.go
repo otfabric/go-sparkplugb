@@ -247,6 +247,18 @@ func SetValue(m *pb.Payload_Metric, dt pb.DataType, v any) error {
 			return ErrTypeMismatch
 		}
 		m.Value = &pb.Payload_Metric_BytesValue{BytesValue: val}
+	case pb.DataType_DataSet:
+		val, ok := v.(*pb.Payload_DataSet)
+		if !ok {
+			return ErrTypeMismatch
+		}
+		m.Value = &pb.Payload_Metric_DatasetValue{DatasetValue: val}
+	case pb.DataType_Template:
+		val, ok := v.(*pb.Payload_Template)
+		if !ok {
+			return ErrTypeMismatch
+		}
+		m.Value = &pb.Payload_Metric_TemplateValue{TemplateValue: val}
 
 	// Array types
 	case pb.DataType_Int8Array:

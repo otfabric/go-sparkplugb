@@ -105,7 +105,7 @@ applicable (broker or server requirement).
 | Validate seq ordering per Edge Node | tck-id-host-topic-phid-seq-validation | Y | |
 | On seq gap: request rebirth via NCMD | tck-id-host-topic-phid-seq-rebirth | Y | |
 | Mark metrics STALE on NDEATH/DDEATH | tck-id-host-topic-phid-stale-metrics | Y | Stale flag on EdgeNodeState/DeviceState |
-| Message reordering timeout (optional) | tck-id-host-topic-phid-reorder | N | Config placeholder only |
+| Message reordering timeout (optional) | tck-id-host-topic-phid-reorder | Y | ReorderTimeout config, timer-based |
 
 ### Primary Host Behavior
 
@@ -161,16 +161,16 @@ applicable (broker or server requirement).
 
 | Requirement | TCK ID | Status | Notes |
 |------------|--------|--------|-------|
-| Template definition: is_definition=true, version | — | N | optional |
-| Template instance: template_ref set | — | N | optional |
-| Parameters on instances | — | N | optional |
+| Template definition: is_definition=true, version | — | Y | payload/template.go |
+| Template instance: template_ref set | — | Y | payload/template.go |
+| Parameters on instances | — | Y | payload/template.go |
 
 ### DataSets
 
 | Requirement | TCK ID | Status | Notes |
 |------------|--------|--------|-------|
-| num_of_columns, columns, types, rows | — | N | optional |
-| DataSetValue typed per column | — | N | optional |
+| num_of_columns, columns, types, rows | — | Y | payload/dataset.go |
+| DataSetValue typed per column | — | Y | payload/dataset.go |
 
 ### PropertySets
 
@@ -187,7 +187,7 @@ applicable (broker or server requirement).
 | Requirement | Status | Notes |
 |------------|--------|-------|
 | Multiple MQTT server support (Edge) | Y | ServerURLs + walkServers() on primary host offline |
-| Multiple MQTT server support (Host) | N | Per-server STATE |
+| Multiple MQTT server support (Host) | P | ServerURLs config, single-broker connect |
 | Reconnection with bdSeq increment | Y | |
 
 ---
@@ -210,9 +210,9 @@ applicable (broker or server requirement).
 | Group | Status |
 |-------|--------|
 | Aliases | Y |
-| DataSets | N |
+| DataSets | Y |
 | Properties | Y |
-| Templates | N |
+| Templates | Y |
 | Complex Data (SendComplexData) | N |
 
 ### Sparkplug Host Application (mandatory)
@@ -223,10 +223,10 @@ applicable (broker or server requirement).
 | Session Termination | Y |
 | Send Command | Y |
 | Edge Session Termination | Y |
-| Multiple Broker | N |
+| Multiple Broker | P |
 
 ### Sparkplug Host Application (optional)
 
 | Group | Status |
 |-------|--------|
-| Message Reordering | N |
+| Message Reordering | Y |

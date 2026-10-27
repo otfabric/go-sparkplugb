@@ -5,6 +5,7 @@ package host
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -72,14 +73,28 @@ func (m *mockTransport) Disconnect(_ context.Context) error {
 
 func (m *mockTransport) deliverToAll(topicStr string, data []byte) {
 	m.mu.Lock()
-	handlers := make([]mqtt.MessageHandler, 0, len(m.handlers))
-	for _, h := range m.handlers {
-		handlers = append(handlers, h)
+	var handler mqtt.MessageHandler
+	for sub, h := range m.handlers {
+		if mqttTopicMatch(sub, topicStr) {
+			handler = h
+			break
+		}
 	}
 	m.mu.Unlock()
-	for _, h := range handlers {
-		h(topicStr, data)
+	if handler != nil {
+		handler(topicStr, data)
 	}
+}
+
+func mqttTopicMatch(filter, t string) bool {
+	if filter == t {
+		return true
+	}
+	if strings.HasSuffix(filter, "/#") {
+		prefix := filter[:len(filter)-2]
+		return t == prefix || strings.HasPrefix(t, prefix+"/")
+	}
+	return false
 }
 
 func (m *mockTransport) getPublished() []publishedMsg {
@@ -1020,6 +1035,152 @@ func TestHostDeviceAliasResolution(t *testing.T) {
 		t.Error("rpm metric not found after alias-based DDATA")
 	} else if m.GetIntValue() != 3000 {
 		t.Errorf("rpm = %d, want 3000", m.GetIntValue())
+	}
+}
+
+func TestHostServerURLsFallback(t *testing.T) {
+	tr := newMockTransport()
+	cfg := Config{
+		HostID:     "testHost",
+		ServerURLs: []string{"tcp://broker1:1883", "tcp://broker2:1883"},
+	}
+	app, err := New(tr, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Connect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if tr.opts.BrokerURL != "tcp://broker1:1883" {
+		t.Errorf("BrokerURL = %q, want tcp://broker1:1883", tr.opts.BrokerURL)
+	}
+}
+
+func TestHostBrokerURLTakesPrecedence(t *testing.T) {
+	tr := newMockTransport()
+	cfg := Config{
+		HostID:     "testHost",
+		BrokerURL:  "tcp://primary:1883",
+		ServerURLs: []string{"tcp://backup:1883"},
+	}
+	app, _ := New(tr, cfg)
+	_ = app.Connect(context.Background())
+	if tr.opts.BrokerURL != "tcp://primary:1883" {
+		t.Errorf("BrokerURL = %q, want tcp://primary:1883", tr.opts.BrokerURL)
+	}
+}
+
+func TestHostReorderTimeout(t *testing.T) {
+	tr := newMockTransport()
+	cfg := testConfig()
+	cfg.ReorderTimeout = 50 * time.Millisecond
+	app, _ := New(tr, cfg)
+	ctx := context.Background()
+	_ = app.Connect(ctx)
+
+	// NBIRTH
+	bdSeq := payload.BdSeqMetric(0)
+	p := payload.NewPayload(0, bdSeq)
+	b, _ := payload.Encode(p)
+	tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NBIRTH, EdgeNodeID: "n1"}.String(), b)
+
+	// Send seq=5 (gap from 0) — should start timer, not immediately rebirth
+	m, _ := payload.NewMetric("x", pb.DataType_Int32, int32(1))
+	p5 := payload.NewPayload(5, m)
+	b5, _ := payload.Encode(p5)
+	pubCountBefore := len(tr.getPublished())
+	tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NDATA, EdgeNodeID: "n1"}.String(), b5)
+
+	// No immediate rebirth
+	time.Sleep(10 * time.Millisecond)
+	pubCountAfter := len(tr.getPublished())
+	if pubCountAfter != pubCountBefore {
+		t.Error("rebirth should not be sent immediately with ReorderTimeout")
+	}
+
+	// Wait for timer to fire
+	time.Sleep(100 * time.Millisecond)
+	msgs := tr.getPublished()
+	var rebirthFound bool
+	for _, msg := range msgs[pubCountBefore:] {
+		if msg.Topic == "spBv1.0/g1/NCMD/n1" {
+			rebirthFound = true
+		}
+	}
+	if !rebirthFound {
+		t.Error("rebirth should be sent after ReorderTimeout expires")
+	}
+}
+
+func TestHostReorderTimeoutCancelledByCorrectSeq(t *testing.T) {
+	tr := newMockTransport()
+	cfg := testConfig()
+	cfg.ReorderTimeout = 200 * time.Millisecond
+	app, _ := New(tr, cfg)
+	ctx := context.Background()
+	_ = app.Connect(ctx)
+
+	// NBIRTH
+	bdSeq := payload.BdSeqMetric(0)
+	p := payload.NewPayload(0, bdSeq)
+	b, _ := payload.Encode(p)
+	tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NBIRTH, EdgeNodeID: "n1"}.String(), b)
+
+	// Send seq=5 (gap) — starts reorder timer
+	m, _ := payload.NewMetric("x", pb.DataType_Int32, int32(1))
+	p5 := payload.NewPayload(5, m)
+	b5, _ := payload.Encode(p5)
+	tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NDATA, EdgeNodeID: "n1"}.String(), b5)
+
+	// Send correct seq=1 — should cancel the timer
+	p1 := payload.NewPayload(1, m)
+	b1, _ := payload.Encode(p1)
+	pubCountBefore := len(tr.getPublished())
+	tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NDATA, EdgeNodeID: "n1"}.String(), b1)
+
+	// Wait past the timeout — no rebirth should fire
+	time.Sleep(300 * time.Millisecond)
+	msgs := tr.getPublished()
+	for _, msg := range msgs[pubCountBefore:] {
+		if msg.Topic == "spBv1.0/g1/NCMD/n1" {
+			t.Error("rebirth should NOT be sent when correct seq cancels reorder timer")
+		}
+	}
+}
+
+func TestHostReorderTimeoutCancelledByRebirth(t *testing.T) {
+	tr := newMockTransport()
+	cfg := testConfig()
+	cfg.ReorderTimeout = 200 * time.Millisecond
+	app, _ := New(tr, cfg)
+	ctx := context.Background()
+	_ = app.Connect(ctx)
+
+	// NBIRTH
+	bdSeq := payload.BdSeqMetric(0)
+	p := payload.NewPayload(0, bdSeq)
+	b, _ := payload.Encode(p)
+	tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NBIRTH, EdgeNodeID: "n1"}.String(), b)
+
+	// Send seq gap
+	m, _ := payload.NewMetric("x", pb.DataType_Int32, int32(1))
+	p5 := payload.NewPayload(5, m)
+	b5, _ := payload.Encode(p5)
+	tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NDATA, EdgeNodeID: "n1"}.String(), b5)
+
+	// New NBIRTH (rebirth) — should cancel timer
+	bdSeq2 := payload.BdSeqMetric(1)
+	p2 := payload.NewPayload(0, bdSeq2)
+	b2, _ := payload.Encode(p2)
+	pubCountBefore := len(tr.getPublished())
+	tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NBIRTH, EdgeNodeID: "n1"}.String(), b2)
+
+	time.Sleep(300 * time.Millisecond)
+	msgs := tr.getPublished()
+	for _, msg := range msgs[pubCountBefore:] {
+		if msg.Topic == "spBv1.0/g1/NCMD/n1" {
+			t.Error("rebirth request should NOT fire after node re-birthed")
+		}
 	}
 }
 

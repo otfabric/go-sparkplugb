@@ -58,6 +58,8 @@ type Config struct {
 	BrokerURL string
 	ClientID  string
 
+	ServerURLs []string
+
 	ReorderTimeout time.Duration
 
 	Logger        Logger
@@ -94,28 +96,30 @@ type App struct {
 	cfg       Config
 	transport mqtt.Transport
 
-	mu      sync.RWMutex
-	state   State
-	nodes   map[string]*EdgeNodeState
-	closeCh chan struct{}
+	mu             sync.RWMutex
+	state          State
+	nodes          map[string]*EdgeNodeState
+	closeCh        chan struct{}
+	reorderTimers  map[string]*time.Timer // nodeKey -> pending rebirth timer
 }
 
 func New(transport mqtt.Transport, cfg Config) (*App, error) {
 	if cfg.HostID == "" {
 		return nil, errors.New("sparkplugb: HostID required")
 	}
-	if cfg.BrokerURL == "" {
-		return nil, errors.New("sparkplugb: BrokerURL required")
+	if cfg.BrokerURL == "" && len(cfg.ServerURLs) == 0 {
+		return nil, errors.New("sparkplugb: BrokerURL or ServerURLs required")
 	}
 	if cfg.ClientID == "" {
 		cfg.ClientID = fmt.Sprintf("sparkplug_host_%s", cfg.HostID)
 	}
 
 	return &App{
-		cfg:       cfg,
-		transport: transport,
-		nodes:     make(map[string]*EdgeNodeState),
-		closeCh:   make(chan struct{}),
+		cfg:            cfg,
+		transport:      transport,
+		nodes:          make(map[string]*EdgeNodeState),
+		closeCh:        make(chan struct{}),
+		reorderTimers:  make(map[string]*time.Timer),
 	}, nil
 }
 
@@ -132,8 +136,13 @@ func (a *App) Connect(ctx context.Context) error {
 	willPayload, _ := json.Marshal(statePayload{Online: false, Timestamp: ts})
 	stateTopic := topic.ForState(a.cfg.HostID)
 
+	brokerURL := a.cfg.BrokerURL
+	if brokerURL == "" && len(a.cfg.ServerURLs) > 0 {
+		brokerURL = a.cfg.ServerURLs[0]
+	}
+
 	err := a.transport.Connect(ctx, mqtt.ConnectOpts{
-		BrokerURL:    a.cfg.BrokerURL,
+		BrokerURL:    brokerURL,
 		ClientID:     a.cfg.ClientID,
 		CleanSession: true,
 		WillTopic:    stateTopic,
@@ -175,6 +184,10 @@ func (a *App) Disconnect(ctx context.Context) error {
 		return nil
 	}
 	a.setState(Disconnected)
+	for k, t := range a.reorderTimers {
+		t.Stop()
+		delete(a.reorderTimers, k)
+	}
 	a.mu.Unlock()
 
 	ts := time.Now().UnixMilli()
@@ -370,6 +383,10 @@ func (a *App) handleNBIRTH(t topic.Topic, data []byte) {
 		}
 	}
 	a.nodes[key] = ns
+	if timer, ok := a.reorderTimers[key]; ok {
+		timer.Stop()
+		delete(a.reorderTimers, key)
+	}
 	a.mu.Unlock()
 
 	if a.cfg.OnNodeBirth != nil {
@@ -560,16 +577,42 @@ func (a *App) resolveDeviceMetricName(ds *DeviceState, m *pb.Payload_Metric) str
 func (a *App) validateSeq(ns *EdgeNodeState, seq uint64, t topic.Topic) bool {
 	expected := (ns.LastSeq + 1) % 256
 	if seq != expected {
-		a.logWarn("seq gap on %s/%s: got %d, expected %d — requesting rebirth",
-			t.GroupID, t.EdgeNodeID, seq, expected)
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_ = a.RequestRebirth(ctx, t.GroupID, t.EdgeNodeID)
-		}()
+		key := nodeKey(t.GroupID, t.EdgeNodeID)
+		if a.cfg.ReorderTimeout > 0 {
+			if _, pending := a.reorderTimers[key]; !pending {
+				a.logWarn("seq gap on %s/%s: got %d, expected %d — waiting %v for reorder",
+					t.GroupID, t.EdgeNodeID, seq, expected, a.cfg.ReorderTimeout)
+				a.reorderTimers[key] = time.AfterFunc(a.cfg.ReorderTimeout, func() {
+					a.mu.Lock()
+					_, stillPending := a.reorderTimers[key]
+					delete(a.reorderTimers, key)
+					a.mu.Unlock()
+					if !stillPending {
+						return
+					}
+					a.logWarn("reorder timeout for %s/%s — requesting rebirth", t.GroupID, t.EdgeNodeID)
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					_ = a.RequestRebirth(ctx, t.GroupID, t.EdgeNodeID)
+				})
+			}
+		} else {
+			a.logWarn("seq gap on %s/%s: got %d, expected %d — requesting rebirth",
+				t.GroupID, t.EdgeNodeID, seq, expected)
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = a.RequestRebirth(ctx, t.GroupID, t.EdgeNodeID)
+			}()
+		}
 		return false
 	}
 	ns.LastSeq = seq
+	key := nodeKey(t.GroupID, t.EdgeNodeID)
+	if timer, ok := a.reorderTimers[key]; ok {
+		timer.Stop()
+		delete(a.reorderTimers, key)
+	}
 	return true
 }
 
