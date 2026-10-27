@@ -90,14 +90,3 @@ func waitForPort(ctx context.Context, port int) error {
 	}
 }
 
-func pullImages(t *testing.T) {
-	t.Helper()
-	for _, b := range brokers {
-		image := resolveImage(b)
-		t.Logf("pulling %s", image)
-		out, err := exec.Command("docker", "pull", image).CombinedOutput()
-		if err != nil {
-			t.Fatalf("pull %s: %v\n%s", image, err, out)
-		}
-	}
-}
