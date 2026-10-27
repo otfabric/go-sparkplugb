@@ -1,0 +1,49 @@
+.PHONY: fmt fmt-check lint vet vuln test coverage fuzz generate generate-check cross clean
+
+GO       ?= go
+GOFLAGS  ?= -race
+COVERPKG ?= ./...
+
+fmt:
+	gofumpt -w .
+
+fmt-check:
+	@test -z "$$(gofumpt -l .)" || { gofumpt -l .; exit 1; }
+
+lint:
+	golangci-lint run ./...
+
+vet:
+	$(GO) vet ./...
+
+vuln:
+	govulncheck ./...
+
+test:
+	$(GO) test $(GOFLAGS) -count=1 ./...
+
+coverage:
+	$(GO) test $(GOFLAGS) -count=1 -coverprofile=coverage.out -coverpkg=$(COVERPKG) ./...
+	$(GO) tool cover -func=coverage.out
+
+coverage-check: coverage
+	@awk '/^total:/ { gsub(/%/,"",$$3); if ($$3+0 < 90) { print "Coverage " $$3 "% < 90%"; exit 1 } }' coverage.out
+
+fuzz:
+	$(GO) test -fuzz=. -fuzztime=$${FUZZTIME:-30s} ./payload/...
+
+generate:
+	$(GO) generate ./proto/...
+
+generate-check: generate
+	@git diff --exit-code -- proto/ || { echo "generated code is stale"; exit 1; }
+
+cross:
+	GOOS=linux   GOARCH=amd64 $(GO) build ./...
+	GOOS=linux   GOARCH=arm64 $(GO) build ./...
+	GOOS=darwin  GOARCH=amd64 $(GO) build ./...
+	GOOS=darwin  GOARCH=arm64 $(GO) build ./...
+	GOOS=windows GOARCH=amd64 $(GO) build ./...
+
+clean:
+	rm -f coverage.out

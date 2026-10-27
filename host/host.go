@@ -1,0 +1,524 @@
+// SPDX-License-Identifier: MIT
+
+package host
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/otfabric/go-sparkplugb/mqtt"
+	"github.com/otfabric/go-sparkplugb/payload"
+	pb "github.com/otfabric/go-sparkplugb/proto"
+	"github.com/otfabric/go-sparkplugb/topic"
+)
+
+var (
+	ErrClosed       = errors.New("sparkplugb: host closed")
+	ErrNotConnected = errors.New("sparkplugb: host not connected")
+)
+
+type State uint8
+
+const (
+	Disconnected State = iota
+	Connecting
+	Connected
+	Closed
+)
+
+var stateStrings = [...]string{"disconnected", "connecting", "connected", "closed"}
+
+func (s State) String() string {
+	if int(s) < len(stateStrings) {
+		return stateStrings[s]
+	}
+	return "unknown"
+}
+
+type Logger interface {
+	Debugf(format string, args ...any)
+	Infof(format string, args ...any)
+	Warnf(format string, args ...any)
+	Errorf(format string, args ...any)
+}
+
+type StateHandler func(old, new State)
+
+type NodeHandler func(groupID, nodeID string, metrics []*pb.Payload_Metric)
+type DeviceHandler func(groupID, nodeID, deviceID string, metrics []*pb.Payload_Metric)
+type NodeEventHandler func(groupID, nodeID string)
+type DeviceEventHandler func(groupID, nodeID, deviceID string)
+
+type Config struct {
+	HostID    string
+	BrokerURL string
+	ClientID  string
+
+	ReorderTimeout time.Duration
+
+	Logger        Logger
+	OnState       StateHandler
+	OnNodeBirth   NodeHandler
+	OnDeviceBirth DeviceHandler
+	OnNodeData    NodeHandler
+	OnDeviceData  DeviceHandler
+	OnNodeDeath   NodeEventHandler
+	OnDeviceDeath DeviceEventHandler
+}
+
+type EdgeNodeState struct {
+	GroupID    string
+	EdgeNodeID string
+	Online     bool
+	BdSeq      uint64
+	LastSeq    uint64
+	Metrics    map[string]*pb.Payload_Metric
+	Devices    map[string]*DeviceState
+}
+
+type DeviceState struct {
+	DeviceID string
+	Online   bool
+	Metrics  map[string]*pb.Payload_Metric
+}
+
+type App struct {
+	cfg       Config
+	transport mqtt.Transport
+
+	mu      sync.RWMutex
+	state   State
+	nodes   map[string]*EdgeNodeState
+	closeCh chan struct{}
+}
+
+func New(transport mqtt.Transport, cfg Config) (*App, error) {
+	if cfg.HostID == "" {
+		return nil, errors.New("sparkplugb: HostID required")
+	}
+	if cfg.BrokerURL == "" {
+		return nil, errors.New("sparkplugb: BrokerURL required")
+	}
+	if cfg.ClientID == "" {
+		cfg.ClientID = fmt.Sprintf("sparkplug_host_%s", cfg.HostID)
+	}
+
+	return &App{
+		cfg:       cfg,
+		transport: transport,
+		nodes:     make(map[string]*EdgeNodeState),
+		closeCh:   make(chan struct{}),
+	}, nil
+}
+
+func (a *App) Connect(ctx context.Context) error {
+	a.mu.Lock()
+	if a.state == Closed {
+		a.mu.Unlock()
+		return ErrClosed
+	}
+	a.setState(Connecting)
+	a.mu.Unlock()
+
+	ts := time.Now().UnixMilli()
+	willPayload, _ := json.Marshal(statePayload{Online: false, Timestamp: ts})
+	stateTopic := topic.ForState(a.cfg.HostID)
+
+	err := a.transport.Connect(ctx, mqtt.ConnectOpts{
+		BrokerURL:    a.cfg.BrokerURL,
+		ClientID:     a.cfg.ClientID,
+		CleanSession: true,
+		WillTopic:    stateTopic,
+		WillPayload:  willPayload,
+		WillQoS:      1,
+		WillRetained: true,
+	})
+	if err != nil {
+		a.mu.Lock()
+		a.setState(Disconnected)
+		a.mu.Unlock()
+		return fmt.Errorf("sparkplugb: host connect: %w", err)
+	}
+
+	if err := a.transport.Subscribe(ctx, stateTopic, 1, a.handleMessage); err != nil {
+		return fmt.Errorf("sparkplugb: subscribe STATE: %w", err)
+	}
+
+	if err := a.transport.Subscribe(ctx, topic.Namespace+"/#", 1, a.handleMessage); err != nil {
+		return fmt.Errorf("sparkplugb: subscribe spBv1.0/#: %w", err)
+	}
+
+	birthPayload, _ := json.Marshal(statePayload{Online: true, Timestamp: ts})
+	if err := a.transport.Publish(ctx, stateTopic, 1, true, birthPayload); err != nil {
+		return fmt.Errorf("sparkplugb: publish STATE birth: %w", err)
+	}
+
+	a.mu.Lock()
+	a.setState(Connected)
+	a.mu.Unlock()
+
+	return nil
+}
+
+func (a *App) Disconnect(ctx context.Context) error {
+	a.mu.Lock()
+	if a.state == Closed || a.state == Disconnected {
+		a.mu.Unlock()
+		return nil
+	}
+	a.setState(Disconnected)
+	a.mu.Unlock()
+
+	ts := time.Now().UnixMilli()
+	deathPayload, _ := json.Marshal(statePayload{Online: false, Timestamp: ts})
+	stateTopic := topic.ForState(a.cfg.HostID)
+	_ = a.transport.Publish(ctx, stateTopic, 1, true, deathPayload)
+
+	return a.transport.Disconnect(ctx)
+}
+
+func (a *App) Close(ctx context.Context) error {
+	a.mu.Lock()
+	if a.state == Closed {
+		a.mu.Unlock()
+		return nil
+	}
+	a.mu.Unlock()
+
+	err := a.Disconnect(ctx)
+	a.mu.Lock()
+	a.setState(Closed)
+	close(a.closeCh)
+	a.mu.Unlock()
+	return err
+}
+
+func (a *App) SendNodeCommand(ctx context.Context, groupID, nodeID string, metrics []*pb.Payload_Metric) error {
+	a.mu.RLock()
+	if a.state != Connected {
+		a.mu.RUnlock()
+		return ErrNotConnected
+	}
+	a.mu.RUnlock()
+
+	p := &pb.Payload{Metrics: metrics}
+	ts := uint64(time.Now().UnixMilli())
+	p.Timestamp = &ts
+
+	b, err := payload.Encode(p)
+	if err != nil {
+		return fmt.Errorf("sparkplugb: encode NCMD: %w", err)
+	}
+
+	t := topic.Topic{
+		GroupID:    groupID,
+		Type:       topic.NCMD,
+		EdgeNodeID: nodeID,
+	}.String()
+
+	return a.transport.Publish(ctx, t, 0, false, b)
+}
+
+func (a *App) SendDeviceCommand(ctx context.Context, groupID, nodeID, deviceID string, metrics []*pb.Payload_Metric) error {
+	a.mu.RLock()
+	if a.state != Connected {
+		a.mu.RUnlock()
+		return ErrNotConnected
+	}
+	a.mu.RUnlock()
+
+	p := &pb.Payload{Metrics: metrics}
+	ts := uint64(time.Now().UnixMilli())
+	p.Timestamp = &ts
+
+	b, err := payload.Encode(p)
+	if err != nil {
+		return fmt.Errorf("sparkplugb: encode DCMD: %w", err)
+	}
+
+	t := topic.Topic{
+		GroupID:    groupID,
+		Type:       topic.DCMD,
+		EdgeNodeID: nodeID,
+		DeviceID:   deviceID,
+	}.String()
+
+	return a.transport.Publish(ctx, t, 0, false, b)
+}
+
+func (a *App) RequestRebirth(ctx context.Context, groupID, nodeID string) error {
+	return a.SendNodeCommand(ctx, groupID, nodeID, []*pb.Payload_Metric{
+		payload.RebirthMetric(true),
+	})
+}
+
+func (a *App) GetNode(groupID, nodeID string) *EdgeNodeState {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.nodes[nodeKey(groupID, nodeID)]
+}
+
+func (a *App) Nodes() []*EdgeNodeState {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	out := make([]*EdgeNodeState, 0, len(a.nodes))
+	for _, n := range a.nodes {
+		out = append(out, n)
+	}
+	return out
+}
+
+func (a *App) State() State {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.state
+}
+
+func (a *App) setState(s State) {
+	old := a.state
+	a.state = s
+	if a.cfg.OnState != nil && old != s {
+		a.cfg.OnState(old, s)
+	}
+	if a.cfg.Logger != nil && old != s {
+		a.cfg.Logger.Infof("host state: %s -> %s", old, s)
+	}
+}
+
+type statePayload struct {
+	Online    bool  `json:"online"`
+	Timestamp int64 `json:"timestamp"`
+}
+
+func (a *App) handleMessage(topicStr string, data []byte) {
+	t, err := topic.Parse(topicStr)
+	if err != nil {
+		return
+	}
+
+	switch t.Type {
+	case topic.STATE:
+		return
+	case topic.NBIRTH:
+		a.handleNBIRTH(t, data)
+	case topic.NDEATH:
+		a.handleNDEATH(t, data)
+	case topic.DBIRTH:
+		a.handleDBIRTH(t, data)
+	case topic.DDEATH:
+		a.handleDDEATH(t, data)
+	case topic.NDATA:
+		a.handleNDATA(t, data)
+	case topic.DDATA:
+		a.handleDDATA(t, data)
+	}
+}
+
+func (a *App) handleNBIRTH(t topic.Topic, data []byte) {
+	p, err := payload.Decode(data)
+	if err != nil {
+		a.logWarn("decode NBIRTH from %s/%s: %v", t.GroupID, t.EdgeNodeID, err)
+		return
+	}
+
+	a.mu.Lock()
+	key := nodeKey(t.GroupID, t.EdgeNodeID)
+	ns := &EdgeNodeState{
+		GroupID:    t.GroupID,
+		EdgeNodeID: t.EdgeNodeID,
+		Online:     true,
+		LastSeq:    p.GetSeq(),
+		Metrics:    make(map[string]*pb.Payload_Metric),
+		Devices:    make(map[string]*DeviceState),
+	}
+	for _, m := range p.Metrics {
+		if m.GetName() == "bdSeq" {
+			ns.BdSeq = m.GetLongValue()
+		} else {
+			ns.Metrics[m.GetName()] = m
+		}
+	}
+	a.nodes[key] = ns
+	a.mu.Unlock()
+
+	if a.cfg.OnNodeBirth != nil {
+		a.cfg.OnNodeBirth(t.GroupID, t.EdgeNodeID, p.Metrics)
+	}
+}
+
+func (a *App) handleNDEATH(t topic.Topic, data []byte) {
+	p, err := payload.Decode(data)
+	if err != nil {
+		a.logWarn("decode NDEATH from %s/%s: %v", t.GroupID, t.EdgeNodeID, err)
+		return
+	}
+
+	a.mu.Lock()
+	key := nodeKey(t.GroupID, t.EdgeNodeID)
+	ns := a.nodes[key]
+	if ns != nil {
+		for _, m := range p.Metrics {
+			if m.GetName() == "bdSeq" {
+				if m.GetLongValue() != ns.BdSeq {
+					a.mu.Unlock()
+					a.logWarn("NDEATH bdSeq mismatch for %s/%s: got %d, expected %d",
+						t.GroupID, t.EdgeNodeID, m.GetLongValue(), ns.BdSeq)
+					return
+				}
+			}
+		}
+		ns.Online = false
+		for _, dev := range ns.Devices {
+			dev.Online = false
+		}
+	}
+	a.mu.Unlock()
+
+	if a.cfg.OnNodeDeath != nil {
+		a.cfg.OnNodeDeath(t.GroupID, t.EdgeNodeID)
+	}
+}
+
+func (a *App) handleDBIRTH(t topic.Topic, data []byte) {
+	p, err := payload.Decode(data)
+	if err != nil {
+		a.logWarn("decode DBIRTH from %s/%s/%s: %v", t.GroupID, t.EdgeNodeID, t.DeviceID, err)
+		return
+	}
+
+	a.mu.Lock()
+	ns := a.nodes[nodeKey(t.GroupID, t.EdgeNodeID)]
+	if ns != nil {
+		if !a.validateSeq(ns, p.GetSeq(), t) {
+			a.mu.Unlock()
+			return
+		}
+		ds := &DeviceState{
+			DeviceID: t.DeviceID,
+			Online:   true,
+			Metrics:  make(map[string]*pb.Payload_Metric),
+		}
+		for _, m := range p.Metrics {
+			ds.Metrics[m.GetName()] = m
+		}
+		ns.Devices[t.DeviceID] = ds
+	}
+	a.mu.Unlock()
+
+	if a.cfg.OnDeviceBirth != nil {
+		a.cfg.OnDeviceBirth(t.GroupID, t.EdgeNodeID, t.DeviceID, p.Metrics)
+	}
+}
+
+func (a *App) handleDDEATH(t topic.Topic, data []byte) {
+	p, err := payload.Decode(data)
+	if err != nil {
+		a.logWarn("decode DDEATH from %s/%s/%s: %v", t.GroupID, t.EdgeNodeID, t.DeviceID, err)
+		return
+	}
+
+	a.mu.Lock()
+	ns := a.nodes[nodeKey(t.GroupID, t.EdgeNodeID)]
+	if ns != nil {
+		if !a.validateSeq(ns, p.GetSeq(), t) {
+			a.mu.Unlock()
+			return
+		}
+		if ds, ok := ns.Devices[t.DeviceID]; ok {
+			ds.Online = false
+		}
+	}
+	a.mu.Unlock()
+
+	if a.cfg.OnDeviceDeath != nil {
+		a.cfg.OnDeviceDeath(t.GroupID, t.EdgeNodeID, t.DeviceID)
+	}
+}
+
+func (a *App) handleNDATA(t topic.Topic, data []byte) {
+	p, err := payload.Decode(data)
+	if err != nil {
+		a.logWarn("decode NDATA from %s/%s: %v", t.GroupID, t.EdgeNodeID, err)
+		return
+	}
+
+	a.mu.Lock()
+	ns := a.nodes[nodeKey(t.GroupID, t.EdgeNodeID)]
+	if ns != nil {
+		if !a.validateSeq(ns, p.GetSeq(), t) {
+			a.mu.Unlock()
+			return
+		}
+		for _, m := range p.Metrics {
+			name := m.GetName()
+			if name != "" {
+				ns.Metrics[name] = m
+			}
+		}
+	}
+	a.mu.Unlock()
+
+	if a.cfg.OnNodeData != nil {
+		a.cfg.OnNodeData(t.GroupID, t.EdgeNodeID, p.Metrics)
+	}
+}
+
+func (a *App) handleDDATA(t topic.Topic, data []byte) {
+	p, err := payload.Decode(data)
+	if err != nil {
+		a.logWarn("decode DDATA from %s/%s/%s: %v", t.GroupID, t.EdgeNodeID, t.DeviceID, err)
+		return
+	}
+
+	a.mu.Lock()
+	ns := a.nodes[nodeKey(t.GroupID, t.EdgeNodeID)]
+	if ns != nil {
+		if !a.validateSeq(ns, p.GetSeq(), t) {
+			a.mu.Unlock()
+			return
+		}
+		if ds, ok := ns.Devices[t.DeviceID]; ok {
+			for _, m := range p.Metrics {
+				name := m.GetName()
+				if name != "" {
+					ds.Metrics[name] = m
+				}
+			}
+		}
+	}
+	a.mu.Unlock()
+
+	if a.cfg.OnDeviceData != nil {
+		a.cfg.OnDeviceData(t.GroupID, t.EdgeNodeID, t.DeviceID, p.Metrics)
+	}
+}
+
+func (a *App) validateSeq(ns *EdgeNodeState, seq uint64, t topic.Topic) bool {
+	expected := (ns.LastSeq + 1) % 256
+	if seq != expected {
+		a.logWarn("seq gap on %s/%s: got %d, expected %d — requesting rebirth",
+			t.GroupID, t.EdgeNodeID, seq, expected)
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = a.RequestRebirth(ctx, t.GroupID, t.EdgeNodeID)
+		}()
+		return false
+	}
+	ns.LastSeq = seq
+	return true
+}
+
+func (a *App) logWarn(format string, args ...any) {
+	if a.cfg.Logger != nil {
+		a.cfg.Logger.Warnf(format, args...)
+	}
+}
+
+func nodeKey(groupID, nodeID string) string {
+	return groupID + "/" + nodeID
+}
