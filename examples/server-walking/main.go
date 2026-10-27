@@ -19,8 +19,8 @@ func main() {
 	transport := mqtt.NewPahoTransport()
 
 	node, err := edge.New(transport, edge.Config{
-		GroupID:    "factory1",
-		EdgeNodeID: "gateway1",
+		GroupID:       "factory1",
+		EdgeNodeID:    "gateway1",
 		PrimaryHostID: "scada1",
 		ServerURLs: []string{
 			"tcp://broker1:1883",

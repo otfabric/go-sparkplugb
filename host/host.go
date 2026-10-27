@@ -91,11 +91,11 @@ type App struct {
 	cfg       Config
 	transport mqtt.Transport
 
-	mu             sync.RWMutex
-	state          State
-	nodes          map[string]*EdgeNodeState
-	closeCh        chan struct{}
-	reorderTimers  map[string]*time.Timer // nodeKey -> pending rebirth timer
+	mu            sync.RWMutex
+	state         State
+	nodes         map[string]*EdgeNodeState
+	closeCh       chan struct{}
+	reorderTimers map[string]*time.Timer // nodeKey -> pending rebirth timer
 }
 
 func New(transport mqtt.Transport, cfg Config) (*App, error) {
@@ -114,11 +114,11 @@ func New(transport mqtt.Transport, cfg Config) (*App, error) {
 	cfg.Logger = sparkplugb.ComponentLogger(cfg.Logger, "host")
 
 	return &App{
-		cfg:            cfg,
-		transport:      transport,
-		nodes:          make(map[string]*EdgeNodeState),
-		closeCh:        make(chan struct{}),
-		reorderTimers:  make(map[string]*time.Timer),
+		cfg:           cfg,
+		transport:     transport,
+		nodes:         make(map[string]*EdgeNodeState),
+		closeCh:       make(chan struct{}),
+		reorderTimers: make(map[string]*time.Timer),
 	}, nil
 }
 

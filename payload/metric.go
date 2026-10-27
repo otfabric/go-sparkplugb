@@ -12,10 +12,10 @@ import (
 )
 
 var (
-	ErrTypeMismatch = errors.New("sparkplugb: datatype mismatch")
-	ErrInvalidArray = errors.New("sparkplugb: invalid array encoding")
-	ErrUnknownType  = errors.New("sparkplugb: unknown datatype")
-	ErrNilMetric    = errors.New("sparkplugb: nil metric")
+	ErrTypeMismatch  = errors.New("sparkplugb: datatype mismatch")
+	ErrInvalidArray  = errors.New("sparkplugb: invalid array encoding")
+	ErrUnknownType   = errors.New("sparkplugb: unknown datatype")
+	ErrNilMetric     = errors.New("sparkplugb: nil metric")
 	ErrArrayTooLarge = errors.New("sparkplugb: array exceeds maximum size")
 )
 

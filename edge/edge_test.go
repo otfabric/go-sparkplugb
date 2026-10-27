@@ -738,8 +738,8 @@ type failBdSeqStore struct {
 	storeErr error
 }
 
-func (f *failBdSeqStore) Load() (uint64, error)  { return 0, f.loadErr }
-func (f *failBdSeqStore) Store(uint64) error      { return f.storeErr }
+func (f *failBdSeqStore) Load() (uint64, error) { return 0, f.loadErr }
+func (f *failBdSeqStore) Store(uint64) error    { return f.storeErr }
 
 func TestSubscribeNCMDFailure(t *testing.T) {
 	tr := &failSubscribeTransport{mockTransport: newMockTransport(), failTopic: "spBv1.0/testGroup/NCMD/testNode"}
@@ -1171,7 +1171,7 @@ func TestDeviceAliasTracking(t *testing.T) {
 	}
 }
 
-func strPtr(s string) *string  { return &s }
+func strPtr(s string) *string      { return &s }
 func dtPtr(dt pb.DataType) *uint32 { v := uint32(dt); return &v }
 
 func TestServerWalking(t *testing.T) {

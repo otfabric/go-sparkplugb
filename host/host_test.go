@@ -1184,5 +1184,5 @@ func TestHostReorderTimeoutCancelledByRebirth(t *testing.T) {
 	}
 }
 
-func strPtr(s string) *string       { return &s }
-func dtPtr(dt pb.DataType) *uint32   { v := uint32(dt); return &v }
+func strPtr(s string) *string      { return &s }
+func dtPtr(dt pb.DataType) *uint32 { v := uint32(dt); return &v }
