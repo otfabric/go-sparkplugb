@@ -115,6 +115,9 @@ type Node struct {
 	// Birth state for auto-rebirth
 	birthMetrics []*pb.Payload_Metric
 
+	// Server walking
+	serverIdx int
+
 	rebirthMu      sync.Mutex
 	rebirthPending bool
 }
@@ -188,10 +191,7 @@ func (n *Node) Connect(ctx context.Context) error {
 	connGen := n.gen
 	n.mu.Unlock()
 
-	brokerURL := n.cfg.BrokerURL
-	if brokerURL == "" && len(n.cfg.ServerURLs) > 0 {
-		brokerURL = n.cfg.ServerURLs[0]
-	}
+	brokerURL := n.brokerURL()
 
 	err = n.transport.Connect(ctx, mqtt.ConnectOpts{
 		BrokerURL:    brokerURL,
@@ -270,6 +270,8 @@ func (n *Node) PublishBirth(ctx context.Context, nodeMetrics []*pb.Payload_Metri
 	bdSeq := n.bdSeq
 	n.mu.Unlock()
 
+	payload.StampMetrics(nodeMetrics)
+
 	birthMetrics := make([]*pb.Payload_Metric, 0, len(nodeMetrics)+1)
 	birthMetrics = append(birthMetrics, payload.BdSeqMetric(bdSeq))
 	birthMetrics = append(birthMetrics, nodeMetrics...)
@@ -303,6 +305,7 @@ func (n *Node) PublishDeviceBirth(ctx context.Context, deviceID string, metrics 
 	seq := n.seq
 	n.mu.Unlock()
 
+	payload.StampMetrics(metrics)
 	p := payload.NewPayload(seq, metrics...)
 	return n.publish(ctx, topic.DBIRTH, deviceID, p)
 }
@@ -317,6 +320,7 @@ func (n *Node) PublishNodeData(ctx context.Context, metrics []*pb.Payload_Metric
 	seq := n.seq
 	n.mu.Unlock()
 
+	payload.StampMetrics(metrics)
 	p := payload.NewPayload(seq, metrics...)
 	return n.publish(ctx, topic.NDATA, "", p)
 }
@@ -331,6 +335,7 @@ func (n *Node) PublishDeviceData(ctx context.Context, deviceID string, metrics [
 	seq := n.seq
 	n.mu.Unlock()
 
+	payload.StampMetrics(metrics)
 	p := payload.NewPayload(seq, metrics...)
 	return n.publish(ctx, topic.DDATA, deviceID, p)
 }
@@ -584,12 +589,45 @@ func (n *Node) handleState(topicStr string, data []byte) {
 	}
 
 	n.mu.Lock()
-	defer n.mu.Unlock()
-
+	walk := false
 	if sp.Online && n.state == WaitingForPrimaryHost {
 		n.setState(Online)
 	} else if !sp.Online && n.state == Online && n.cfg.PrimaryHostID != "" {
-		n.setState(Disconnected)
 		n.born = false
+		n.birthMetrics = nil
+		n.setState(Disconnected)
+		walk = len(n.cfg.ServerURLs) > 1
+	}
+	n.mu.Unlock()
+
+	if walk {
+		go n.walkServers()
+	}
+}
+
+func (n *Node) brokerURL() string {
+	if len(n.cfg.ServerURLs) > 0 {
+		return n.cfg.ServerURLs[n.serverIdx%len(n.cfg.ServerURLs)]
+	}
+	return n.cfg.BrokerURL
+}
+
+func (n *Node) walkServers() {
+	_ = n.transport.Disconnect(context.Background())
+
+	n.mu.Lock()
+	n.serverIdx = (n.serverIdx + 1) % len(n.cfg.ServerURLs)
+	n.mu.Unlock()
+
+	if n.cfg.Logger != nil {
+		n.cfg.Logger.Infof("walking to server %s", n.brokerURL())
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := n.Connect(ctx); err != nil {
+		if n.cfg.Logger != nil {
+			n.cfg.Logger.Errorf("walk connect failed: %v", err)
+		}
 	}
 }

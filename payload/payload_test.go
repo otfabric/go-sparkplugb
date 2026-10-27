@@ -114,3 +114,26 @@ func TestSetQualityOverwrite(t *testing.T) {
 		t.Errorf("expected 1 property key, got %d", len(m.Properties.Keys))
 	}
 }
+
+func TestStampMetrics(t *testing.T) {
+	// Metric without timestamp
+	name := "temperature"
+	m1 := &pb.Payload_Metric{Name: &name}
+	// Metric with existing timestamp (should not be overwritten)
+	ts := uint64(1000)
+	m2 := &pb.Payload_Metric{Name: &name, Timestamp: &ts}
+
+	StampMetrics([]*pb.Payload_Metric{m1, m2, nil})
+
+	if m1.Timestamp == nil {
+		t.Error("StampMetrics should set timestamp on metric without one")
+	}
+	if *m2.Timestamp != 1000 {
+		t.Errorf("StampMetrics should not overwrite existing timestamp, got %d", *m2.Timestamp)
+	}
+}
+
+func TestStampMetricsEmpty(t *testing.T) {
+	StampMetrics(nil)
+	StampMetrics([]*pb.Payload_Metric{})
+}

@@ -112,7 +112,7 @@ applicable (broker or server requirement).
 | Requirement | TCK ID | Status | Notes |
 |------------|--------|--------|-------|
 | Edge waits for Primary Host STATE online=true | tck-id-message-flow-edge-node-birth-primary-host | Y | |
-| Edge walks server list if STATE online=false | tck-id-message-flow-edge-node-birth-primary-host-walk | N | Not yet implemented |
+| Edge walks server list if STATE online=false | tck-id-message-flow-edge-node-birth-primary-host-walk | Y | walkServers() cycles ServerURLs |
 | Edge disconnects if Primary Host goes offline | tck-id-message-flow-edge-node-birth-primary-host-offline | Y | |
 
 ---
@@ -127,7 +127,7 @@ applicable (broker or server requirement).
 | Metric alias in BIRTH and DATA | — | Y | Edge tracks, Host resolves |
 | Alias unique across entire Edge Node | — | Y | Edge alias map, Host alias map |
 | DataType field set on every metric | — | Y | payload package |
-| Timestamp on every metric | — | P | Payload-level only |
+| Timestamp on every metric | — | Y | NewMetric/StampMetrics sets per-metric ts |
 | is_null for null values | — | Y | payload package |
 | is_historical for historical data | — | Y | Proto field available |
 | is_transient for non-stored data | — | Y | Proto field available |
@@ -186,7 +186,7 @@ applicable (broker or server requirement).
 
 | Requirement | Status | Notes |
 |------------|--------|-------|
-| Multiple MQTT server support (Edge) | P | Config accepts ServerURLs; walking not implemented |
+| Multiple MQTT server support (Edge) | Y | ServerURLs + walkServers() on primary host offline |
 | Multiple MQTT server support (Host) | N | Per-server STATE |
 | Reconnection with bdSeq increment | Y | |
 
@@ -202,14 +202,14 @@ applicable (broker or server requirement).
 | Session Termination | Y |
 | Send Data | Y |
 | Receive Command | Y |
-| Primary Host | P |
-| Multiple Broker | P |
+| Primary Host | Y |
+| Multiple Broker | Y |
 
 ### Sparkplug Edge Node (optional)
 
 | Group | Status |
 |-------|--------|
-| Aliases | N |
+| Aliases | Y |
 | DataSets | N |
 | Properties | Y |
 | Templates | N |

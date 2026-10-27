@@ -1174,6 +1174,118 @@ func TestDeviceAliasTracking(t *testing.T) {
 func strPtr(s string) *string  { return &s }
 func dtPtr(dt pb.DataType) *uint32 { v := uint32(dt); return &v }
 
+func TestServerWalking(t *testing.T) {
+	tr := newMockTransport()
+	cfg := Config{
+		GroupID:       "g",
+		EdgeNodeID:    "n",
+		PrimaryHostID: "myHost",
+		ServerURLs:    []string{"tcp://broker1:1883", "tcp://broker2:1883", "tcp://broker3:1883"},
+	}
+	n, err := New(tr, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := n.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if tr.connectOpts.BrokerURL != "tcp://broker1:1883" {
+		t.Errorf("initial broker = %q, want broker1", tr.connectOpts.BrokerURL)
+	}
+
+	// Bring host online, then take it offline to trigger walk
+	stateTopic := topic.ForState("myHost")
+	b, _ := json.Marshal(statePayload{Online: true, Timestamp: 1})
+	tr.deliver(stateTopic, b)
+	if n.State() != Online {
+		t.Fatalf("state = %s, want online", n.State())
+	}
+
+	// Host goes offline — walkServers runs in a goroutine
+	b, _ = json.Marshal(statePayload{Online: false, Timestamp: 2})
+	tr.deliver(stateTopic, b)
+
+	// Wait for walk goroutine to reconnect
+	for i := 0; i < 50; i++ {
+		tr.mu.Lock()
+		url := tr.connectOpts.BrokerURL
+		tr.mu.Unlock()
+		if url == "tcp://broker2:1883" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	tr.mu.Lock()
+	url := tr.connectOpts.BrokerURL
+	tr.mu.Unlock()
+	if url != "tcp://broker2:1883" {
+		t.Errorf("after walk, broker = %q, want broker2", url)
+	}
+}
+
+func TestServerWalkingSingleServer(t *testing.T) {
+	tr := newMockTransport()
+	cfg := Config{
+		GroupID:       "g",
+		EdgeNodeID:    "n",
+		PrimaryHostID: "myHost",
+		ServerURLs:    []string{"tcp://broker1:1883"},
+	}
+	n, err := New(tr, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := n.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	stateTopic := topic.ForState("myHost")
+	b, _ := json.Marshal(statePayload{Online: true, Timestamp: 1})
+	tr.deliver(stateTopic, b)
+
+	b, _ = json.Marshal(statePayload{Online: false, Timestamp: 2})
+	tr.deliver(stateTopic, b)
+
+	// Single server: no walk, just disconnects
+	if n.State() != Disconnected {
+		t.Errorf("state = %s, want disconnected", n.State())
+	}
+}
+
+func TestStampMetricsOnPublish(t *testing.T) {
+	tr := newMockTransport()
+	n, err := New(tr, testConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := n.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create metric WITHOUT a timestamp
+	m := &pb.Payload_Metric{
+		Name:     strPtr("temperature"),
+		Datatype: dtPtr(pb.DataType_Double),
+		Value:    &pb.Payload_Metric_DoubleValue{DoubleValue: 22.5},
+	}
+	if m.Timestamp != nil {
+		t.Fatal("precondition: metric should have no timestamp")
+	}
+
+	if err := n.PublishBirth(ctx, []*pb.Payload_Metric{m}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The metric should now have a timestamp set by StampMetrics
+	if m.Timestamp == nil {
+		t.Error("StampMetrics should have set a timestamp on the metric")
+	}
+}
+
 func TestDeviceDeathUnknownDevice(t *testing.T) {
 	tr := newMockTransport()
 	n, err := New(tr, testConfig())

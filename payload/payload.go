@@ -105,6 +105,15 @@ func GetQuality(m *pb.Payload_Metric) (int32, bool) {
 	return 0, false
 }
 
+func StampMetrics(metrics []*pb.Payload_Metric) {
+	ts := uint64(time.Now().UnixMilli())
+	for _, m := range metrics {
+		if m != nil && m.Timestamp == nil {
+			m.Timestamp = &ts
+		}
+	}
+}
+
 func BdSeqMetric(bdSeq uint64) *pb.Payload_Metric {
 	name := "bdSeq"
 	dt := uint32(pb.DataType_Int64)
