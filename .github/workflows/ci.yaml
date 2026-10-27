@@ -16,6 +16,6 @@ jobs:
     uses: otfabric/.github/.github/workflows/go-ci.yml@v2
     with:
       codecov-name: go-sparkplugb
-      go-versions: '["1.24", "1.25", "1.26"]'
+      go-versions: '["1.26", "1.27"]'
       test-exclude-regex: "(/example(s)?($|/)|/proto($|/))"
     secrets: inherit

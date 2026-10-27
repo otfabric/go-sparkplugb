@@ -103,7 +103,7 @@ applicable (broker or server requirement).
 |------------|--------|--------|-------|
 | Track online/offline state of all Edge Nodes | tck-id-host-topic-phid-state-tracking | Y | |
 | Validate seq ordering per Edge Node | tck-id-host-topic-phid-seq-validation | Y | |
-| On seq gap: request rebirth via NCMD | tck-id-host-topic-phid-seq-rebirth | Y | |
+| On seq gap: request rebirth via NCMD | tck-id-host-topic-phid-seq-rebirth | Y | At most one pending request per node (2 s) |
 | Mark metrics STALE on NDEATH/DDEATH | tck-id-host-topic-phid-stale-metrics | Y | Stale flag on EdgeNodeState/DeviceState |
 | Message reordering timeout (optional) | tck-id-host-topic-phid-reorder | Y | ReorderTimeout config, timer-based |
 

@@ -2,7 +2,7 @@
 
 Production-quality [Eclipse Sparkplug B 3.0.0](https://sparkplug.eclipse.org/specification/version/3.0/documents/sparkplug-specification-3.0.0.pdf) library for Go.
 
-[![Go](https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![CI](https://github.com/otfabric/go-sparkplugb/actions/workflows/ci.yaml/badge.svg)](https://github.com/otfabric/go-sparkplugb/actions/workflows/ci.yaml)
 [![Coverage](https://img.shields.io/badge/coverage-91%25-brightgreen)](docs/CONFORMANCE.md)
@@ -13,8 +13,8 @@ go-sparkplugb handles the full Sparkplug B 3.0.0 protocol lifecycle for Edge
 Nodes, Host Applications and Applications: topic namespace, Protobuf codecs,
 typed metrics (including arrays, templates and datasets), sequence numbering,
 alias management, birth/death certificates, primary host awareness with server
-walking, and message reordering. Plug in any MQTT 3.1.1 or 5.0 client through
-the transport interface.
+walking, and message reordering. It ships an MQTT 3.1.1 transport over Eclipse
+Paho; any other MQTT client plugs in through the `mqtt.Transport` interface.
 
 **Quick links:**
 [Install](#installation) ·
@@ -22,6 +22,8 @@ the transport interface.
 [Host Application](#quick-start--host-application) ·
 [Application](#quick-start--application) ·
 [Packages](#packages) ·
+[Comparison](#go-sparkplugb-vs-other-sparkplug-b-stacks) ·
+[Compatibility](#compatibility-matrix) ·
 [Examples](#examples) ·
 [Conformance](#specification-conformance) ·
 [Related projects](#related-projects)
@@ -33,14 +35,112 @@ the transport interface.
 | Category | Details |
 |----------|---------|
 | **Edge Node runtime** | Full lifecycle (birth/death/rebirth), sequence numbering, alias support, primary host awareness, server walking across multiple brokers |
-| **Host Application runtime** | STATE birth/death certificates, node/device registry, sequence validation, automatic rebirth requests, message reordering timeout |
+| **Host Application runtime** | STATE birth/death certificates, node/device registry, sequence validation, out-of-order messages held and applied in `seq` order, rebirth requests (at most one pending per node), reorder timeout |
 | **Application runtime** | Non-primary-host consumer: subscribes to spBv1.0/#, tracks nodes/devices, alias resolution, sends NCMD/DCMD — no STATE messages |
 | **Typed metric codec** | All scalar types, signed-integer handling (Int8–Int64 in wire fields), all array types (little-endian packed, bit-packed BooleanArray, null-terminated StringArray, DateTimeArray), quality codes |
 | **Templates** | Template definitions (is_definition, version, member metrics, parameters) and instances (template_ref, parameter overrides) |
 | **DataSets** | Columnar data with typed columns (num_of_columns, columns, types, rows), round-trip encode/decode |
 | **Topic namespace** | Parser and builder for `spBv1.0/{group}/{type}/{node}/[{device}]` with validation |
+| **Observability** | Pluggable `Logger` (`log/slog`, standard `log`) and `Metrics` callbacks per role; `context.Context` on every blocking call |
 | **Protobuf types** | Generated from the canonical Eclipse Tahu `sparkplug_b.proto` (pinned commit, SHA-256 verified) |
-| **MQTT transport** | Interface-based — plug in Paho, EMQX, or any MQTT client |
+| **MQTT transport** | `mqtt.Transport` interface; Eclipse Paho adapter (MQTT 3.1.1 over TCP, TLS or WebSocket) included |
+
+## go-sparkplugb vs other Sparkplug B stacks
+
+go-sparkplugb is tested against five other implementations (see the
+[compatibility matrix](#compatibility-matrix)). All are good libraries; this
+table compares them, to help you pick the right one for your project.
+
+| Capability | **otfabric/go-sparkplugb** | Eclipse Tahu (Java) | pysparkplug | SparkplugNet | srad | sparkplughost |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|
+| Language | Go | Java | Python | C# | Rust | Go |
+| License | MIT (`proto/` EPL-2.0) | EPL-2.0 | Apache-2.0 | MIT | MIT or Apache-2.0 | Apache-2.0 |
+| Edge node | ✅ | ✅ | ✅ | ✅ | ✅ | — |
+| Primary host application (STATE) | ✅ | ✅ | — ¹ | ✅ | ✅ | ✅ |
+| Application without STATE | ✅ | ✅ | ✅ plain client | ✅ | — | — |
+| STATE of Sparkplug 3.0 / 2.2 | 3.0 | 3.0 | 3.0 | 3.0 and 2.2 | 3.0 | 3.0 |
+| MQTT | 3.1.1 (Paho), any client through `mqtt.Transport` | 3.1.1 (Paho) | 3.1.1 and 5 (paho-mqtt) | 3.1.1 and 5 (MQTTnet) | 5 (rumqttc) | 3.1.1 (Paho) |
+| TLS, WebSocket | ✅ ✅ | by URL scheme, no TLS settings | ✅ ✅ | ✅ ✅ | not documented | ✅ TLS |
+| Edge: devices | ✅ | ✅ | ✅ | ✅ | ✅ | — |
+| Edge: metric aliases | ✅ caller-assigned | ✅ generated | ✅ caller-assigned | ✅ caller-assigned | ✅ | — |
+| Edge: births wait for the primary host's STATE | ✅ | ✅ | — | — ² | — ³ | — |
+| Edge: server walking when the primary host goes offline | ✅ | ✅ | — | — | — ³ | — |
+| Host: `seq` check with rebirth request | ✅ | ✅ | — | — | ✅ | ✅ |
+| Host: out-of-order messages held and resequenced | ✅ across the NBIRTH too, configurable timeout | ✅ fixed 5 s | — | — | ✅ default 3 s | ✅ default 5 s |
+| Host: NDEATH of an earlier session (`bdSeq`) ignored | ✅ | ✅ | — | — | ✅ | ✅ |
+| Typed scalars and arrays | ✅ | ✅ | ✅ | ✅ | ✅ | — raw protobuf |
+| DataSet | ✅ | ✅ | — | ✅ | raw protobuf only | — raw protobuf |
+| Template, definition and instance | ✅ | ✅ | — | ✅ | ✅ | — raw protobuf |
+| Properties and property sets | ✅ | ✅ | — | ✅ | ✅ | — raw protobuf |
+| Cancellation | `context.Context` per call | — callbacks, timers | — callbacks | `CancellationToken` | async (tokio) | `context.Context` on `Run` |
+| Logging | `log/slog` or standard `log`, plus metrics callbacks | SLF4J | `logging` | `Microsoft.Extensions.Logging` | `log` crate | `log/slog` |
+
+¹ pysparkplug decodes STATE but has no host application; the application
+publishes STATE itself.
+² SparkplugNet's edge subscribes to the primary host's STATE but publishes
+its births at once.
+³ srad's edge ignores STATE; waiting for the primary host and several
+brokers are on its to-do list.
+
+✅ = available · — = not available. For Eclipse Tahu 1.0.21, pysparkplug
+0.6.1, SparkplugNet 1.4.1, srad 0.5.0 and EvergenEnergy/sparkplughost
+v0.4.0, the versions go-sparkplugb is tested against, from their source at
+those tags as of October 2026. If you spot an inaccuracy, please
+[open an issue](https://github.com/otfabric/go-sparkplugb/issues) and we will
+correct it.
+
+**Choose go-sparkplugb if** you write Go and want all three roles in one
+library: an edge node that follows its primary host across brokers, a host
+that copes with brokers that reorder messages, the full datatype set
+including DataSets and Templates, and `context` control.
+
+**Choose Eclipse Tahu if** you are on the JVM and want the reference
+implementation of the Eclipse Sparkplug project.
+
+**Choose sparkplughost if** you need only a Go host application and work
+with the raw protobuf types.
+
+## Compatibility matrix
+
+Every role of go-sparkplugb runs on every push against the six reference
+stacks of
+[sparkplugb-interop v0.1.0](https://github.com/otfabric/sparkplugb-interop/releases/tag/v0.1.0),
+on four MQTT brokers, with the images pinned by digest in
+[interop/images.go](interop/images.go).
+
+| Reference | Version | go-sparkplugb host and application ← reference edge | go-sparkplugb edge → reference host |
+|-----------|---------|:---:|:---:|
+| Eclipse Tahu (Java) | 1.0.21 | ✅ | ✅ |
+| pysparkplug | 0.6.1 | ✅ ¹ | ✅ ² ⁵ |
+| SparkplugNet | 1.4.1 | ✅ ³ | ✅ ⁴ |
+| srad | 0.5.0 | ✅ | ✅ ⁵ |
+| Eclipse Tahu sparkplug-client (JavaScript) | 3.2.4 | ✅ | (edge only) |
+| EvergenEnergy/sparkplughost | v0.4.0 | (host only) | ✅ ⁵ |
+
+| Broker | Version | Result |
+|--------|---------|:---:|
+| Eclipse Mosquitto | 2.1.2 | ✅ |
+| HiveMQ CE | 2026.5 | ✅ |
+| EMQX | 6.3.2 | ✅ |
+| NanoMQ | 0.25.7 | ✅ |
+
+✅ = every step passes, except the steps that need a capability the
+reference lacks or that hit one of its upstream bugs:
+¹ pysparkplug's NDEATH carries the next `bdSeq`: the will after a crash is
+checked instead.
+² pysparkplug's host cannot decode a negative Int8 or Int16 sign-extended to
+32 bits: the scalars fixture is skipped.
+³ without device writes: SparkplugNet's edge drops a DCMD for a device.
+⁴ without the steps after a death: SparkplugNet's host keeps dead nodes
+online.
+⁵ not on NanoMQ and HiveMQ CE: these brokers reorder a node's messages
+across topics, which these hosts do not resequence across the NBIRTH.
+
+Each step (births, aliases, updates of all fourteen scalar datatypes, NCMD
+and DCMD writes, rebirth, device death and birth, NDEATH, the will, the
+primary host going offline) and the wire behaviour are described in
+[INTEROPERABILITY.md](INTEROPERABILITY.md). Run it with `make interop`
+(Docker).
 
 ## Installation
 
@@ -48,7 +148,7 @@ the transport interface.
 go get github.com/otfabric/go-sparkplugb
 ```
 
-Requires Go 1.24 or later.
+Requires Go 1.26 or later.
 
 ## Packages
 
@@ -218,11 +318,18 @@ MQTT_BROKER=tcp://localhost:1883 go run ./examples/edge-node
 | `EdgeNodeID` | `string` | required | Edge node identifier |
 | `BrokerURL` | `string` | | MQTT broker URL (`tcp://`, `ssl://`) |
 | `ServerURLs` | `[]string` | | Multiple broker URLs for server walking |
-| `ClientID` | `string` | auto | MQTT client ID |
-| `PrimaryHostID` | `string` | | Primary Host Application ID to wait for |
-| `UseAliases` | `bool` | `false` | Use metric aliases in DATA messages |
+| `ClientID` | `string` | `sparkplug_<group>_<node>` | MQTT client ID |
+| `PrimaryHostID` | `string` | | Primary Host Application ID: births wait for its STATE online; its STATE offline makes the node disconnect and walk to the next server |
+| `BdSeqStore` | `BdSeqStore` | in memory | Where `bdSeq` is kept across restarts |
+| `RetryPolicy` | `sparkplugb.RetryPolicy` | `ExponentialBackoff{}` | Reconnect policy while walking servers |
+| `Logger` | `sparkplugb.Logger` | none | Logger (`NewSlogLogger`, `NewStdLogger`) |
+| `Metrics` | `edge.Metrics` | none | Connect, publish, message and state-change callbacks |
 | `OnState` | `func` | | State change callback |
 | `OnNodeCmd` | `func` | | NCMD received callback |
+| `OnDeviceCmd` | `func` | | DCMD received callback |
+
+Aliases are set by the caller on the birth metrics (`Alias`); data may then
+carry the alias only, and `ResolveAlias` maps it back.
 
 ### Host Application Config
 
@@ -231,8 +338,11 @@ MQTT_BROKER=tcp://localhost:1883 go run ./examples/edge-node
 | `HostID` | `string` | required | Host Application identifier |
 | `BrokerURL` | `string` | | MQTT broker URL |
 | `ServerURLs` | `[]string` | | Multiple broker URLs |
-| `ClientID` | `string` | auto | MQTT client ID |
-| `ReorderTimeout` | `time.Duration` | `0` | Wait before requesting rebirth on sequence gap |
+| `ClientID` | `string` | `sparkplug_host_<host id>` | MQTT client ID |
+| `ReorderTimeout` | `time.Duration` | `0` | How long a `seq` gap may stay open before a rebirth request; `0` requests it at once |
+| `Logger` | `sparkplugb.Logger` | none | Logger |
+| `Metrics` | `host.Metrics` | none | Connect, message, state-change, node birth and death callbacks |
+| `OnState` | `func` | | State change callback |
 | `OnNodeBirth` | `func` | | NBIRTH callback |
 | `OnDeviceBirth` | `func` | | DBIRTH callback |
 | `OnNodeData` | `func` | | NDATA callback |
@@ -246,7 +356,9 @@ MQTT_BROKER=tcp://localhost:1883 go run ./examples/edge-node
 |-------|------|---------|-------------|
 | `BrokerURL` | `string` | | MQTT broker URL |
 | `ServerURLs` | `[]string` | | Multiple broker URLs (fallback) |
-| `ClientID` | `string` | auto | MQTT client ID |
+| `ClientID` | `string` | `sparkplug_app_<n>` | MQTT client ID |
+| `Logger` | `sparkplugb.Logger` | none | Logger |
+| `Metrics` | `app.Metrics` | none | Connect, message, state-change, node birth and death callbacks |
 | `OnState` | `func` | | State change callback |
 | `OnNodeBirth` | `func` | | NBIRTH callback |
 | `OnDeviceBirth` | `func` | | DBIRTH callback |
@@ -265,16 +377,6 @@ re-publish NBIRTH. Custom `mqtt.Transport` implementations report this by
 calling `ConnectOpts.OnConnectionLost` with an error wrapping
 `mqtt.ErrConnectionLost`.
 
-### Interoperability
-
-Every role is tested against independent implementations: the edge node
-against the host applications of Eclipse Tahu, pysparkplug, SparkplugNet, srad
-and sparkplughost; the host application and the application against the edge
-nodes of Eclipse Tahu, pysparkplug, SparkplugNet, srad and Eclipse Tahu
-sparkplug-client; on every fixture and on Mosquitto, HiveMQ CE, EMQX and
-NanoMQ. See [INTEROPERABILITY.md](INTEROPERABILITY.md) for the matrix and the
-upstream bugs it found.
-
 ---
 
 ## Specification Conformance
@@ -288,7 +390,7 @@ clause-by-clause requirements matrix.
 | Profile | Mandatory | Optional |
 |---------|-----------|----------|
 | Edge Node | Session, Termination, Data, Commands, Primary Host, Multi-Broker | Aliases, Templates, DataSets, Properties |
-| Host Application | Session, Termination, Commands, Edge Termination | Message Reordering |
+| Host Application | Session, Termination, Commands, Edge Termination; Multi-Broker partial (`ServerURLs`, one broker at a time) | Message Reordering |
 | Application | Subscribe, Track State, Alias Resolution, Seq Validation, Commands | — |
 
 ---
@@ -304,6 +406,7 @@ go-sparkplugb
 ├── host/             Host Application runtime
 ├── app/              Application runtime (non-host consumer)
 ├── mqtt/             MQTT transport interface and Paho adapter
+├── interop/          Interop suite against sparkplugb-interop (own module, Docker)
 ├── examples/
 │   ├── edge-node/        Edge Node lifecycle
 │   ├── host-app/         Host Application lifecycle
@@ -313,9 +416,12 @@ go-sparkplugb
 │   ├── commands/         Sending NCMD and DCMD commands
 │   ├── datasets/         DataSet columnar metrics
 │   └── server-walking/   Multi-broker server walking
-└── docs/
-    ├── CONFORMANCE.md    Specification conformance matrix
-    └── LICENSING.md      License details
+├── docs/
+│   ├── CONFORMANCE.md    Specification conformance matrix
+│   ├── LICENSING.md      License details
+│   └── RESEARCH.md       Design research
+├── INTEROPERABILITY.md   Wire behaviour and the interop matrix
+└── RELEASE.md            Release notes
 ```
 
 ## Building and Development

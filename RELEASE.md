@@ -1,5 +1,27 @@
 # go-sparkplugb Releases
 
+## v0.1.3
+
+**Date:** 2026-10-27
+**Previous release:** v0.1.2
+
+## Summary
+
+Current dependencies and Go releases, and a README that compares
+go-sparkplugb with the other Sparkplug B stacks it is tested against.
+
+## Changes
+
+### Changed
+
+- **Requires Go 1.26 or later** (was 1.24): `golang.org/x/net` v0.61.0 and `golang.org/x/sync` v0.24.0, their latest releases, need it. CI tests Go 1.26 and 1.27, the releases the Go project supports.
+
+### Documentation
+
+- **README:** a comparison with Eclipse Tahu, pysparkplug, SparkplugNet, srad and sparkplughost, from their source at the tested versions; the compatibility matrix by reference stack and broker; the configuration tables list every field (`BdSeqStore`, `RetryPolicy`, `Logger`, `Metrics`, `OnDeviceCmd`) and no longer a `UseAliases` field that does not exist.
+
+---
+
 ## v0.1.2
 
 **Date:** 2026-10-27
