@@ -89,4 +89,3 @@ func waitForPort(ctx context.Context, port int) error {
 		}
 	}
 }
-
