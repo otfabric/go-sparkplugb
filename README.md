@@ -5,7 +5,7 @@ Production-quality [Eclipse Sparkplug B 3.0.0](https://sparkplug.eclipse.org/spe
 [![Go](https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![CI](https://github.com/otfabric/go-sparkplugb/actions/workflows/ci.yaml/badge.svg)](https://github.com/otfabric/go-sparkplugb/actions/workflows/ci.yaml)
-[![Coverage](https://img.shields.io/badge/coverage-95%25-brightgreen)](docs/CONFORMANCE.md)
+[![Coverage](https://img.shields.io/badge/coverage-91%25-brightgreen)](docs/CONFORMANCE.md)
 [![Go Reference](https://pkg.go.dev/badge/github.com/otfabric/go-sparkplugb.svg)](https://pkg.go.dev/github.com/otfabric/go-sparkplugb)
 [![Release](https://img.shields.io/github/v/release/otfabric/go-sparkplugb?include_prereleases)](https://github.com/otfabric/go-sparkplugb/releases)
 
