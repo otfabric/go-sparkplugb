@@ -354,12 +354,15 @@ func (a *Application) dispatch(t topic.Topic, data []byte) {
 // maxHeld is how many messages per edge node are held for reordering.
 const maxHeld = 256
 
-// heldMsg is a message that arrived ahead of its sequence number.
+// heldMsg is a message that arrived ahead of its sequence number, or behind
+// it (nextSession): a message of the edge node's next session that the broker
+// delivered before that session's NBIRTH.
 type heldMsg struct {
-	t    topic.Topic
-	seq  uint64
-	data []byte
-	at   time.Time
+	t           topic.Topic
+	seq         uint64
+	data        []byte
+	at          time.Time
+	nextSession bool
 }
 
 // hold keeps a message that cannot be applied yet: one from an edge node
@@ -368,7 +371,10 @@ type heldMsg struct {
 // of one edge node out of publishing order (NanoMQ does); they are applied in
 // sequence order once the gap is filled (see drain). A rebirth is requested
 // as for a message that is lost. A message behind the expected sequence
-// number is not held: the handlers treat it as a gap.
+// number is held for the next session: a restarted node starts again at 0,
+// and its DBIRTH may arrive before its NBIRTH. It is applied after that
+// NBIRTH, and requests no rebirth: when the NBIRTH does not come, it was a
+// late message of the current session.
 func (a *Application) hold(t topic.Topic, data []byte) bool {
 	p, err := payload.Decode(data)
 	if err != nil {
@@ -379,11 +385,13 @@ func (a *Application) hold(t topic.Topic, data []byte) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	ns := a.nodes[key]
+	behind := false
 	if ns != nil {
 		expected := (ns.LastSeq + 1) % 256
-		if seq == expected || (seq-expected+256)%256 > 128 {
+		if seq == expected {
 			return false
 		}
+		behind = (seq-expected+256)%256 > 128
 	}
 	if a.held == nil {
 		a.held = make(map[string][]heldMsg)
@@ -391,10 +399,12 @@ func (a *Application) hold(t topic.Topic, data []byte) bool {
 	if len(a.held[key]) >= maxHeld {
 		return false
 	}
-	a.held[key] = append(a.held[key], heldMsg{t: t, seq: seq, data: data, at: time.Now()})
-	if ns == nil {
+	a.held[key] = append(a.held[key], heldMsg{t: t, seq: seq, data: data, at: time.Now(), nextSession: behind})
+	switch {
+	case behind:
+	case ns == nil:
 		a.unknownNode(t)
-	} else {
+	default:
 		a.validateSeq(ns, seq, t) // starts the reorder timer or requests a rebirth
 	}
 	return true
@@ -422,7 +432,7 @@ func (a *Application) drain(t topic.Topic) {
 		)
 		for i := range held {
 			switch {
-			case !found && held[i].seq == expected:
+			case !found && !held[i].nextSession && held[i].seq == expected:
 				next, found = &held[i], true
 			case time.Since(held[i].at) > heldMaxAge:
 			default:
@@ -469,6 +479,9 @@ func (a *Application) handleNBIRTH(t topic.Topic, data []byte) {
 	}
 	a.nodes[key] = ns
 	a.answeredRebirth(t)
+	for i := range a.held[key] {
+		a.held[key][i].nextSession = false // this NBIRTH starts their session
+	}
 	a.mu.Unlock()
 
 	a.cfg.Metrics.OnNodeBirth(t.GroupID, t.EdgeNodeID)

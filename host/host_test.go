@@ -1346,6 +1346,40 @@ func TestHostThrottlesSeqGapRebirths(t *testing.T) {
 	expect(2)
 }
 
+func TestHostAppliesNextSessionDBIRTHBeforeNBIRTH(t *testing.T) {
+	tr := newMockTransport()
+	app, _ := New(tr, testConfig())
+	_ = app.Connect(context.Background())
+
+	m, _ := payload.NewMetric("x", pb.DataType_Int32, int32(1))
+	enc := func(seq uint64, ms ...*pb.Payload_Metric) []byte {
+		b, _ := payload.Encode(payload.NewPayload(seq, ms...))
+		return b
+	}
+	tp := func(mt topic.MessageType, dev string) string {
+		return topic.Topic{GroupID: "g1", Type: mt, EdgeNodeID: "n1", DeviceID: dev}.String()
+	}
+	tr.deliverToAll(tp(topic.NBIRTH, ""), enc(0, payload.BdSeqMetric(0), m))
+	for seq := uint64(1); seq <= 5; seq++ {
+		tr.deliverToAll(tp(topic.NDATA, ""), enc(seq, m))
+	}
+	// The node restarts; the broker delivers the DBIRTH of the new session
+	// (seq 1, behind the current session's 6) before its NBIRTH.
+	tr.deliverToAll(tp(topic.DBIRTH, "d1"), enc(1, m))
+	tr.deliverToAll(tp(topic.NBIRTH, ""), enc(0, payload.BdSeqMetric(1), m))
+
+	ns := app.GetNode("g1", "n1")
+	if ns == nil || ns.BdSeq != 1 || ns.Devices["d1"] == nil || !ns.Devices["d1"].Online {
+		t.Fatalf("node %+v: want the new session with device d1 online", ns)
+	}
+	time.Sleep(50 * time.Millisecond)
+	for _, p := range tr.getPublished() {
+		if p.Topic == topic.ForNCMD("g1", "n1") {
+			t.Fatal("rebirth requested for a message of the next session")
+		}
+	}
+}
+
 func TestHostAppliesReorderedMessagesInSequence(t *testing.T) {
 	tr := newMockTransport()
 	app, _ := New(tr, testConfig())

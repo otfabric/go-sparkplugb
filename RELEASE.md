@@ -7,10 +7,15 @@
 
 ## Summary
 
-Current dependencies and Go releases, and a README that compares
+A restarted edge node's DBIRTH delivered before its NBIRTH is no longer
+lost; current dependencies and Go releases; and a README that compares
 go-sparkplugb with the other Sparkplug B stacks it is tested against.
 
 ## Changes
+
+### Fixed
+
+- **`host` and `app`: a message behind the expected `seq` is held for the node's next session** and applied after its NBIRTH. When a node restarted, NanoMQ and HiveMQ CE sometimes delivered the new session's DBIRTH (seq 1) before its NBIRTH; the host took it for a gap in the old session and dropped it, so the device stayed offline unless a rebirth came. Found by the interop tests against pysparkplug on NanoMQ.
 
 ### Changed
 

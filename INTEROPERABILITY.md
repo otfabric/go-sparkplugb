@@ -28,9 +28,10 @@ normative requirements clause by clause.
 | Situation | What the host (package `host`) and the application (package `app`) do |
 |-----------|-------------------------------------------------------------|
 | Messages of a node out of `seq` order | Held, at most 256 per node and 30 seconds, and applied in `seq` order once the gap is filled. MQTT orders messages per topic only, and NanoMQ and HiveMQ CE do deliver a node's DBIRTH before its NBIRTH and data out of order |
+| Message behind the expected `seq` | Held for the node's next session and applied after its NBIRTH, without a rebirth request: a restarted node's DBIRTH may arrive before its NBIRTH |
 | A gap that is not filled | NCMD `Node Control/Rebirth` after `ReorderTimeout` (host), at once without it |
 | Data or DBIRTH from a node without a birth | NCMD `Node Control/Rebirth` |
-| Any of the rebirth requests above | At most one per node every 2 seconds, however many messages are out of order |
+| Any of the rebirth requests above | One pending per node: the next waits for the NBIRTH or 2 seconds, however many messages are out of order |
 | NDEATH whose `bdSeq` is not the birth's | Ignored: it is the will of an earlier session, which a broker may deliver late |
 | Data metric with only an alias | Stored by the name and datatype of its birth |
 | `GetNode`, `Nodes` | Return copies, safe to read while messages arrive |

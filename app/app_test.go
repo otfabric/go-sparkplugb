@@ -491,6 +491,35 @@ func TestApplicationThrottlesSeqGapRebirths(t *testing.T) {
 	}
 }
 
+func TestApplicationAppliesNextSessionDBIRTHBeforeNBIRTH(t *testing.T) {
+	mt := newMockTransport()
+	a, _ := New(mt, Config{BrokerURL: "tcp://localhost:1883"})
+
+	ctx := context.Background()
+	a.Connect(ctx)
+	defer a.Close(ctx)
+
+	mt.deliver("spBv1.0/plant/NBIRTH/gw1", encodeBirth(0, 1))
+	for seq := uint64(1); seq <= 5; seq++ {
+		mt.deliver("spBv1.0/plant/NDATA/gw1", encodeData(seq))
+	}
+	// The node restarts; the broker delivers the DBIRTH of the new session
+	// (seq 1, behind the current session's 6) before its NBIRTH.
+	mt.deliver("spBv1.0/plant/DBIRTH/gw1/motor1", encodeData(1))
+	mt.deliver("spBv1.0/plant/NBIRTH/gw1", encodeBirth(0, 2))
+
+	ns := a.GetNode("plant", "gw1")
+	if ns == nil || ns.BdSeq != 2 || ns.Devices["motor1"] == nil || !ns.Devices["motor1"].Online {
+		t.Fatalf("node %+v: want the new session with device motor1 online", ns)
+	}
+	time.Sleep(100 * time.Millisecond)
+	for _, p := range mt.getPublished() {
+		if p.Topic == "spBv1.0/plant/NCMD/gw1" {
+			t.Fatal("rebirth requested for a message of the next session")
+		}
+	}
+}
+
 func TestApplicationAliasResolution(t *testing.T) {
 	mt := newMockTransport()
 	a, _ := New(mt, Config{BrokerURL: "tcp://localhost:1883"})

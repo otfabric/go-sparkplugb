@@ -217,11 +217,12 @@ type knownBugEntry struct {
 	what                string
 }
 
-// reorderBug is the bug of the hosts that apply the messages of an edge node
-// in the order they arrive: MQTT orders messages per topic only, and NanoMQ
-// and HiveMQ CE deliver the messages of one node on different topics out of
-// publishing order. It shows in some runs only, so the pairing is skipped.
-const reorderBug = "does not reorder the messages of an edge node by seq: on this broker, which delivers messages of different topics out of publishing order, the host misses data and requests rebirths (intermittent)"
+// reorderBug is the bug of the hosts that do not resequence the messages of
+// an edge node across its NBIRTH (pysparkplug's not at all): MQTT orders
+// messages per topic only, and NanoMQ and HiveMQ CE deliver the messages of
+// one node on different topics out of publishing order. It shows in some
+// runs only, so the pairing is skipped.
+const reorderBug = "does not resequence the messages of an edge node across its NBIRTH: on this broker, which delivers messages of different topics out of publishing order, the host misses data and requests rebirths (intermittent)"
 
 // knownBugs are the upstream bugs of the pinned references that change what
 // go-sparkplugb observes, as sparkplugb-interop documents them.
