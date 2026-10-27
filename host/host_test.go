@@ -1297,6 +1297,55 @@ func TestHostRequestsRebirthFromUnknownNode(t *testing.T) {
 	}
 }
 
+func TestHostThrottlesSeqGapRebirths(t *testing.T) {
+	tr := newMockTransport()
+	app, _ := New(tr, testConfig())
+	_ = app.Connect(context.Background())
+
+	m, _ := payload.NewMetric("x", pb.DataType_Int32, int32(1))
+	enc := func(seq uint64, ms ...*pb.Payload_Metric) []byte {
+		b, _ := payload.Encode(payload.NewPayload(seq, ms...))
+		return b
+	}
+	tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NBIRTH, EdgeNodeID: "n1"}.String(), enc(0, payload.BdSeqMetric(0), m))
+	// Several messages out of sequence in a row, as a broker that reorders
+	// across topics delivers them: one rebirth request, not one each.
+	for seq := uint64(5); seq < 10; seq++ {
+		tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NDATA, EdgeNodeID: "n1"}.String(), enc(seq, m))
+	}
+
+	ncmd := topic.ForNCMD("g1", "n1")
+	expect := func(want int) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			var reqs int
+			for _, p := range tr.getPublished() {
+				if p.Topic == ncmd {
+					reqs++
+				}
+			}
+			if reqs == want {
+				time.Sleep(50 * time.Millisecond)
+				return
+			}
+			if reqs > want || time.Now().After(deadline) {
+				t.Fatalf("%d rebirth requests, want %d", reqs, want)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	expect(1)
+	// The NBIRTH answers the request; the messages throttled while it was
+	// pending may have been of this new session: one more request.
+	nbirth := topic.Topic{GroupID: "g1", Type: topic.NBIRTH, EdgeNodeID: "n1"}.String()
+	tr.deliverToAll(nbirth, enc(0, payload.BdSeqMetric(1), m))
+	expect(2)
+	// Nothing was throttled since: no further request.
+	tr.deliverToAll(nbirth, enc(0, payload.BdSeqMetric(2), m))
+	expect(2)
+}
+
 func TestHostAppliesReorderedMessagesInSequence(t *testing.T) {
 	tr := newMockTransport()
 	app, _ := New(tr, testConfig())

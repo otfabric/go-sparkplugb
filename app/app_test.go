@@ -449,6 +449,48 @@ func TestApplicationSeqGapRequestsRebirth(t *testing.T) {
 	}
 }
 
+func TestApplicationThrottlesSeqGapRebirths(t *testing.T) {
+	mt := newMockTransport()
+	a, _ := New(mt, Config{BrokerURL: "tcp://localhost:1883"})
+
+	ctx := context.Background()
+	a.Connect(ctx)
+	defer a.Close(ctx)
+
+	mt.deliver("spBv1.0/plant/NBIRTH/gw1", encodeBirth(0, 1))
+	for seq := uint64(5); seq < 10; seq++ {
+		mt.deliver("spBv1.0/plant/NDATA/gw1", encodeData(seq))
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	var reqs int
+	for _, p := range mt.getPublished() {
+		if p.Topic == "spBv1.0/plant/NCMD/gw1" {
+			reqs++
+		}
+	}
+	if reqs != 1 {
+		t.Fatalf("%d rebirth requests, want 1", reqs)
+	}
+
+	// The NBIRTH answers the request; the messages throttled while it was
+	// pending may have been of this new session: one more request, then none.
+	for range 2 {
+		mt.deliver("spBv1.0/plant/NBIRTH/gw1", encodeBirth(0, 1))
+	}
+	time.Sleep(200 * time.Millisecond)
+	reqs = 0
+	for _, p := range mt.getPublished() {
+		if p.Topic == "spBv1.0/plant/NCMD/gw1" {
+			reqs++
+		}
+	}
+	if reqs != 2 {
+		t.Fatalf("%d rebirth requests after the NBIRTH, want 2", reqs)
+	}
+}
+
 func TestApplicationAliasResolution(t *testing.T) {
 	mt := newMockTransport()
 	a, _ := New(mt, Config{BrokerURL: "tcp://localhost:1883"})

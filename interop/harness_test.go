@@ -375,12 +375,18 @@ type role struct {
 	args    []string
 }
 
+// connectTimeoutMs is the MQTT connection timeout of every reference role
+// (the contract's default is 10 s). Eclipse Tahu on a busy runner took longer
+// than that to reach a HiveMQ that had just started, and gave up. It stays
+// below the 90 s a role has to become ready.
+const connectTimeoutMs = "60000"
+
 // start runs a role of the reference on the world's broker and waits until it
 // is ready: an edge has published its births, a host its STATE.
 func (w *world) start(a adapter, kind string, args ...string) *role {
 	w.t.Helper()
 	r := &role{w: w, adapter: a, kind: kind, name: uniqueName(a.name + "-" + kind),
-		args: append([]string{kind, "--broker", w.refURL}, args...)}
+		args: append([]string{kind, "--broker", w.refURL, "--connect-timeout-ms", connectTimeoutMs}, args...)}
 	r.run()
 	w.t.Cleanup(func() {
 		if w.t.Failed() {

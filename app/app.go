@@ -98,8 +98,9 @@ type Application struct {
 	nodes   map[string]*EdgeNodeState
 	closeCh chan struct{}
 
-	unknownAsked map[string]time.Time // nodeKey -> last rebirth request for an unknown node
-	held         map[string][]heldMsg // nodeKey -> messages ahead of their sequence
+	rebirthAsked  map[string]time.Time // nodeKey -> last rebirth request the application made itself
+	rebirthMissed map[string]bool      // nodeKey -> a request was throttled while one was pending
+	held          map[string][]heldMsg // nodeKey -> messages ahead of their sequence
 }
 
 func New(transport mqtt.Transport, cfg Config) (*Application, error) {
@@ -467,6 +468,7 @@ func (a *Application) handleNBIRTH(t topic.Topic, data []byte) {
 		}
 	}
 	a.nodes[key] = ns
+	a.answeredRebirth(t)
 	a.mu.Unlock()
 
 	a.cfg.Metrics.OnNodeBirth(t.GroupID, t.EdgeNodeID)
@@ -645,13 +647,7 @@ func (a *Application) handleDDATA(t topic.Topic, data []byte) {
 func (a *Application) validateSeq(ns *EdgeNodeState, seq uint64, t topic.Topic) bool {
 	expected := (ns.LastSeq + 1) % 256
 	if seq != expected {
-		a.logWarn("seq gap on %s/%s: got %d, expected %d — requesting rebirth",
-			t.GroupID, t.EdgeNodeID, seq, expected)
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_ = a.RequestRebirth(ctx, t.GroupID, t.EdgeNodeID)
-		}()
+		a.askRebirth(t, fmt.Sprintf("seq gap: got %d, expected %d", seq, expected))
 		return false
 	}
 	ns.LastSeq = seq
@@ -735,27 +731,54 @@ func cloneMetrics(in map[string]*pb.Payload_Metric) map[string]*pb.Payload_Metri
 	return out
 }
 
-// unknownRebirthInterval is how often at most a rebirth is requested from an
-// edge node whose NBIRTH has not been seen.
-const unknownRebirthInterval = 2 * time.Second
+// rebirthInterval is how long a rebirth request the application makes on its own
+// (a seq gap, a node whose NBIRTH has not been seen) waits for its NBIRTH: until it arrives no other request goes to
+// that edge node (see answeredRebirth). A broker that reorders messages
+// across topics (HiveMQ CE, NanoMQ) makes several messages in a row look out
+// of sequence; one request each would make the node publish one NBIRTH
+// each, a rebirth storm.
+const rebirthInterval = 2 * time.Second
 
 // unknownNode requests a rebirth from an edge node that sent a message
 // before any NBIRTH was seen: a host joining while the node is online, or an
 // NBIRTH that a broker delivered after the messages that followed it (MQTT
 // orders messages per topic only). Called with a.mu held.
 func (a *Application) unknownNode(t topic.Topic) {
+	a.askRebirth(t, fmt.Sprintf("%s before its NBIRTH", t.Type))
+}
+
+// askRebirth requests a rebirth from the edge node of t, at most once per
+// rebirthInterval. Called with a.mu held.
+func (a *Application) askRebirth(t topic.Topic, reason string) {
 	key := nodeKey(t.GroupID, t.EdgeNodeID)
-	if a.unknownAsked == nil {
-		a.unknownAsked = make(map[string]time.Time)
+	if a.rebirthAsked == nil {
+		a.rebirthAsked = make(map[string]time.Time)
 	}
-	if last, ok := a.unknownAsked[key]; ok && time.Since(last) < unknownRebirthInterval {
+	if last, ok := a.rebirthAsked[key]; ok && time.Since(last) < rebirthInterval {
+		if a.rebirthMissed == nil {
+			a.rebirthMissed = make(map[string]bool)
+		}
+		a.rebirthMissed[key] = true
 		return
 	}
-	a.unknownAsked[key] = time.Now()
-	a.logWarn("%s from %s/%s before its NBIRTH: requesting rebirth", t.Type, t.GroupID, t.EdgeNodeID)
+	a.rebirthAsked[key] = time.Now()
+	a.logWarn("%s/%s: %s — requesting rebirth", t.GroupID, t.EdgeNodeID, reason)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = a.RequestRebirth(ctx, t.GroupID, t.EdgeNodeID)
 	}()
+}
+
+// answeredRebirth is called with a.mu held when an NBIRTH arrives: the
+// pending rebirth request, if any, is answered. A request throttled while it
+// was pending is made now: its message may be a DBIRTH of this new session
+// that the broker delivered before the NBIRTH, which the NBIRTH has dropped.
+func (a *Application) answeredRebirth(t topic.Topic) {
+	key := nodeKey(t.GroupID, t.EdgeNodeID)
+	delete(a.rebirthAsked, key)
+	if a.rebirthMissed[key] {
+		delete(a.rebirthMissed, key)
+		a.askRebirth(t, "out of sequence before this NBIRTH")
+	}
 }

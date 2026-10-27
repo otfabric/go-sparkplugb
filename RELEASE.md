@@ -1,5 +1,28 @@
 # go-sparkplugb Releases
 
+## v0.1.2
+
+**Date:** 2026-10-27
+**Previous release:** v0.1.1
+
+## Summary
+
+The host and the application no longer flood an edge node with rebirth
+requests when a broker delivers its messages out of order. Found by the
+interop tests against srad on HiveMQ CE.
+
+## Changes
+
+### Fixed
+
+- **`host` and `app`: at most one rebirth request per edge node every 2 seconds**, for a seq gap and a reorder timeout as already for a node without a birth. A broker that reorders messages across topics (HiveMQ CE, NanoMQ) made several messages in a row look out of sequence, each answered with its own rebirth request, so the node published one NBIRTH per request and the host was still applying them after the node's NDEATH.
+
+### Changed
+
+- **Interop tests:** the reference roles get a 60 s MQTT connect timeout instead of the contract's 10 s: Eclipse Tahu on a busy runner sometimes did not reach a HiveMQ that had just started in time.
+
+---
+
 ## v0.1.1
 
 **Date:** 2026-10-27
