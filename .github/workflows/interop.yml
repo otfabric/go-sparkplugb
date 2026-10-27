@@ -78,20 +78,34 @@ jobs:
           images=("${SPARKPLUGB_INTEROP_TAHU_IMAGE}" "${SPARKPLUGB_INTEROP_PYSPARKPLUG_IMAGE}" "${SPARKPLUGB_INTEROP_SPARKPLUGNET_IMAGE}"
                   "${SPARKPLUGB_INTEROP_SRAD_IMAGE}" "${SPARKPLUGB_INTEROP_TAHU_JS_IMAGE}" "${SPARKPLUGB_INTEROP_SPARKPLUGHOST_IMAGE}"
                   "${!broker_var}")
-          for image in "${images[@]}"; do
+          pull() {
+            local attempt
             for attempt in 1 2 3 4 5; do
-              docker pull --quiet "${image}" && break
-              [[ "${attempt}" == 5 ]] && { echo "::error::cannot pull ${image}"; exit 1; }
+              docker pull --quiet "$1" && return 0
+              [[ "${attempt}" == 5 ]] && return 1
               sleep $((attempt * 15))
             done
+          }
+          for image in "${images[@]::6}"; do
+            pull "${image}" || { echo "::error::cannot pull ${image}"; exit 1; }
           done
+          # The mirror does not always have every manifest: then the broker
+          # comes from Docker Hub, by the same digest.
+          if ! pull "${!broker_var}"; then
+            ref="${!broker_var}"
+            hub="docker.io/${ref#mirror.gcr.io/}"
+            echo "::warning::mirror.gcr.io does not serve ${!broker_var}; pulling ${hub}"
+            pull "${hub}" || { echo "::error::cannot pull ${hub}"; exit 1; }
+            echo "${broker_var}=${hub}" >> "$GITHUB_ENV"
+            images[6]="${hub}"
+          fi
           {
             echo "| Image | Upstream |"
             echo "|---|---|"
             for image in "${images[@]::6}"; do
               echo "| \`${image}\` | $(docker run --rm "${image}" print-capabilities | jq -r '"\(.upstream.name) \(.upstream.version)"') |"
             done
-            echo "| \`${!broker_var}\` | broker |"
+            echo "| \`${images[6]}\` | broker |"
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Run the interop suite
