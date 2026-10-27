@@ -1186,3 +1186,30 @@ func TestHostReorderTimeoutCancelledByRebirth(t *testing.T) {
 
 func strPtr(s string) *string      { return &s }
 func dtPtr(dt pb.DataType) *uint32 { v := uint32(dt); return &v }
+
+func TestHostConnectionLost(t *testing.T) {
+	tr := newMockTransport()
+	app, err := New(tr, testConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := app.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	app.mu.Lock()
+	app.reorderTimers["g/n"] = time.AfterFunc(time.Hour, func() {})
+	app.mu.Unlock()
+
+	tr.opts.OnConnectionLost(mqtt.ErrConnectionLost)
+	if app.State() != Disconnected {
+		t.Fatalf("state = %s, want disconnected", app.State())
+	}
+	if len(app.reorderTimers) != 0 {
+		t.Fatal("reorder timers not cleared")
+	}
+	tr.opts.OnConnectionLost(mqtt.ErrConnectionLost)
+	if app.State() != Disconnected {
+		t.Fatalf("state = %s, want disconnected", app.State())
+	}
+}

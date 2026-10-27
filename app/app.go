@@ -136,6 +136,8 @@ func (a *Application) Connect(ctx context.Context) error {
 		BrokerURL:    brokerURL,
 		ClientID:     a.cfg.ClientID,
 		CleanSession: true,
+
+		OnConnectionLost: a.onConnectionLost,
 	})
 	if err != nil {
 		a.mu.Lock()
@@ -280,6 +282,16 @@ func (a *Application) ResolveAlias(groupID, nodeID string, alias uint64) (string
 		}
 	}
 	return "", false
+}
+
+func (a *Application) onConnectionLost(err error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.state == Closed || a.state == Disconnected {
+		return
+	}
+	a.cfg.Logger.Warnf("transport lost: %v", err)
+	a.setState(Disconnected)
 }
 
 func (a *Application) setState(s State) {

@@ -922,3 +922,23 @@ func TestStateString(t *testing.T) {
 		}
 	}
 }
+
+func TestApplicationConnectionLost(t *testing.T) {
+	mt := newMockTransport()
+	a, err := New(mt, Config{BrokerURL: "tcp://localhost:1883"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := a.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	mt.opts.OnConnectionLost(mqtt.ErrConnectionLost)
+	if a.State() != Disconnected {
+		t.Fatalf("state = %s, want disconnected", a.State())
+	}
+	mt.opts.OnConnectionLost(mqtt.ErrConnectionLost)
+	if a.State() != Disconnected {
+		t.Fatalf("state = %s, want disconnected", a.State())
+	}
+}

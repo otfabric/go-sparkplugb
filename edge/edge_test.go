@@ -1305,3 +1305,40 @@ func TestDeviceDeathUnknownDevice(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestConnectionLost(t *testing.T) {
+	tr := newMockTransport()
+	n, err := New(tr, testConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := n.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	staleLost := tr.connectOpts.OnConnectionLost
+
+	_ = n.Disconnect(ctx)
+	if err := n.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	staleLost(mqtt.ErrConnectionLost)
+	if n.State() != Online {
+		t.Fatalf("stale callback changed state to %s", n.State())
+	}
+
+	tr.connectOpts.OnConnectionLost(mqtt.ErrConnectionLost)
+	if n.State() != Disconnected {
+		t.Fatalf("state = %s, want disconnected", n.State())
+	}
+	tr.connectOpts.OnConnectionLost(mqtt.ErrConnectionLost)
+	if err := n.PublishNodeData(ctx, nil); err == nil {
+		t.Fatal("publish after connection loss should fail")
+	}
+	if err := n.Connect(ctx); err != nil {
+		t.Fatalf("reconnect: %v", err)
+	}
+	if n.State() != Online {
+		t.Fatalf("state after reconnect = %s, want online", n.State())
+	}
+}

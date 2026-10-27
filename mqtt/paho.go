@@ -16,6 +16,7 @@ type PahoTransport struct {
 	mu     sync.Mutex
 	client paho.Client
 	opts   *paho.ClientOptions
+	onLost func(error)
 
 	TLSConfig      *tls.Config
 	ConnectTimeout time.Duration
@@ -56,8 +57,15 @@ func (t *PahoTransport) Connect(ctx context.Context, opts ConnectOpts) error {
 		pahoOpts.SetBinaryWill(opts.WillTopic, opts.WillPayload, opts.WillQoS, opts.WillRetained)
 	}
 
+	pahoOpts.SetConnectionLostHandler(func(c paho.Client, err error) {
+		if lost := t.release(c); lost != nil {
+			lost(fmt.Errorf("%w: %w", ErrConnectionLost, err))
+		}
+	})
+
 	t.opts = pahoOpts
 	t.client = paho.NewClient(pahoOpts)
+	t.onLost = nil
 
 	token := t.client.Connect()
 	if !token.WaitTimeout(t.ConnectTimeout) {
@@ -67,7 +75,22 @@ func (t *PahoTransport) Connect(ctx context.Context, opts ConnectOpts) error {
 		return fmt.Errorf("sparkplugb: connect: %w", err)
 	}
 
+	t.onLost = opts.OnConnectionLost
 	return nil
+}
+
+// release detaches c if it is still the current client and returns the
+// connection-lost callback to fire, so each connection reports its end once.
+func (t *PahoTransport) release(c paho.Client) func(error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if c == nil || t.client != c {
+		return nil
+	}
+	lost := t.onLost
+	t.client = nil
+	t.onLost = nil
+	return lost
 }
 
 func (t *PahoTransport) Publish(ctx context.Context, topic string, qos byte, retained bool, payload []byte) error {
@@ -109,11 +132,14 @@ func (t *PahoTransport) Subscribe(ctx context.Context, topic string, qos byte, h
 func (t *PahoTransport) Disconnect(ctx context.Context) error {
 	t.mu.Lock()
 	client := t.client
-	t.client = nil
 	t.mu.Unlock()
 
+	lost := t.release(client)
 	if client != nil && client.IsConnected() {
 		client.Disconnect(250)
+	}
+	if lost != nil {
+		lost(ErrConnectionLost)
 	}
 	return nil
 }

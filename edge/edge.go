@@ -204,6 +204,8 @@ func (n *Node) Connect(ctx context.Context) error {
 		WillPayload:  willBytes,
 		WillQoS:      1,
 		WillRetained: false,
+
+		OnConnectionLost: n.makeConnLostHandler(connGen),
 	})
 	if err != nil {
 		n.mu.Lock()
@@ -458,6 +460,19 @@ func (n *Node) ResolveAlias(alias uint64) (string, bool) {
 	defer n.mu.Unlock()
 	name, ok := n.aliases[alias]
 	return name, ok
+}
+
+func (n *Node) makeConnLostHandler(connGen uint64) func(error) {
+	return func(err error) {
+		n.mu.Lock()
+		defer n.mu.Unlock()
+		if n.gen != connGen || n.state == Closed || n.state == Disconnected {
+			return
+		}
+		n.cfg.Logger.Warnf("transport lost: %v", err)
+		n.born = false
+		n.setState(Disconnected)
+	}
 }
 
 func (n *Node) setState(s State) {

@@ -148,6 +148,8 @@ func (a *App) Connect(ctx context.Context) error {
 		WillPayload:  willPayload,
 		WillQoS:      1,
 		WillRetained: true,
+
+		OnConnectionLost: a.onConnectionLost,
 	})
 	if err != nil {
 		a.mu.Lock()
@@ -311,6 +313,20 @@ func (a *App) ResolveAlias(groupID, nodeID string, alias uint64) (string, bool) 
 		}
 	}
 	return "", false
+}
+
+func (a *App) onConnectionLost(err error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.state == Closed || a.state == Disconnected {
+		return
+	}
+	a.cfg.Logger.Warnf("transport lost: %v", err)
+	for k, t := range a.reorderTimers {
+		t.Stop()
+		delete(a.reorderTimers, k)
+	}
+	a.setState(Disconnected)
 }
 
 func (a *App) setState(s State) {

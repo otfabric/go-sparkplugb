@@ -255,6 +255,16 @@ MQTT_BROKER=tcp://localhost:1883 go run ./examples/edge-node
 | `OnNodeDeath` | `func` | | NDEATH callback |
 | `OnDeviceDeath` | `func` | | DDEATH callback |
 
+### Connection loss
+
+Edge nodes, host applications and applications move to `Disconnected` (and
+fire `OnState`) as soon as the transport reports the connection gone — a
+broker drop, a client-ID takeover, or `Disconnect` called on the transport
+directly. Call `Connect` again to resume; edge nodes bump `bdSeq` and must
+re-publish NBIRTH. Custom `mqtt.Transport` implementations report this by
+calling `ConnectOpts.OnConnectionLost` with an error wrapping
+`mqtt.ErrConnectionLost`.
+
 ---
 
 ## Specification Conformance
@@ -307,6 +317,7 @@ go-sparkplugb
 | `make lint` | Run golangci-lint |
 | `make build` | Build examples |
 | `make check` | Lint + test + coverage gate (90%) |
+| `make interop` | Edge/host/app against Mosquitto, HiveMQ CE, EMQX and NanoMQ in Docker (`interop/` module) |
 
 ```bash
 git clone https://github.com/otfabric/go-sparkplugb.git

@@ -314,3 +314,65 @@ func TestRebirthCycle(t *testing.T) {
 		})
 	}
 }
+
+func TestConnectionDrop(t *testing.T) {
+	startBrokers(t)
+	for _, b := range brokers {
+		t.Run(b.Name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			url := fmt.Sprintf("tcp://127.0.0.1:%d", b.Port)
+
+			tr := mqtt.NewPahoTransport()
+			n, err := edge.New(tr, edge.Config{
+				GroupID:    "interopGroup",
+				EdgeNodeID: fmt.Sprintf("drop-%s", b.Name),
+				BrokerURL:  url,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := n.Connect(ctx); err != nil {
+				t.Fatalf("connect: %v", err)
+			}
+			m, _ := payload.NewMetric("x", pb.DataType_Int32, int32(0))
+			if err := n.PublishBirth(ctx, []*pb.Payload_Metric{m}); err != nil {
+				t.Fatalf("birth: %v", err)
+			}
+
+			if err := tr.Disconnect(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if n.State() != edge.Disconnected {
+				t.Fatalf("state after transport disconnect = %s, want disconnected", n.State())
+			}
+
+			if err := n.Connect(ctx); err != nil {
+				t.Fatalf("reconnect: %v", err)
+			}
+			defer n.Close(ctx)
+			if err := n.PublishBirth(ctx, []*pb.Payload_Metric{m}); err != nil {
+				t.Fatalf("birth after reconnect: %v", err)
+			}
+
+			// A second session with the same client ID makes the broker drop the first.
+			usurper := mqtt.NewPahoTransport()
+			if err := usurper.Connect(ctx, mqtt.ConnectOpts{
+				BrokerURL:    url,
+				ClientID:     fmt.Sprintf("sparkplug_interopGroup_drop-%s", b.Name),
+				CleanSession: true,
+			}); err != nil {
+				t.Fatalf("takeover connect: %v", err)
+			}
+			defer usurper.Disconnect(ctx)
+
+			deadline := time.Now().Add(10 * time.Second)
+			for n.State() != edge.Disconnected {
+				if time.Now().After(deadline) {
+					t.Fatalf("state after broker takeover = %s, want disconnected", n.State())
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
+		})
+	}
+}
