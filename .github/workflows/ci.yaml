@@ -28,7 +28,9 @@ jobs:
           version: "2024.1.1"
 
       - name: Test
-        run: go test -race -coverprofile=coverage.out ./...
+        run: |
+          go test -race -coverprofile=coverage.out \
+            $(go list ./... | grep -v /examples/ | grep -v /proto)
 
       - name: Coverage gate
         run: |

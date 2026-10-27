@@ -4,6 +4,8 @@ package app
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -664,6 +666,244 @@ func TestApplicationNodeReplacement(t *testing.T) {
 		t.Fatal("new metric should be present")
 	}
 }
+
+func TestApplicationConnectError(t *testing.T) {
+	mt := newMockTransport()
+	mt.connectErr = errors.New("connection refused")
+	a, _ := New(mt, Config{BrokerURL: "tcp://localhost:1883"})
+
+	err := a.Connect(context.Background())
+	if err == nil {
+		t.Fatal("expected connect error")
+	}
+	if a.State() != Disconnected {
+		t.Fatalf("expected Disconnected after connect error, got %s", a.State())
+	}
+}
+
+func TestApplicationNDATAWithAlias(t *testing.T) {
+	mt := newMockTransport()
+	a, _ := New(mt, Config{BrokerURL: "tcp://localhost:1883"})
+
+	ctx := context.Background()
+	a.Connect(ctx)
+	defer a.Close(ctx)
+
+	alias := uint64(42)
+	tempMetric := &pb.Payload_Metric{}
+	tempMetric.Name = strPtr("temperature")
+	dt := uint32(pb.DataType_Double)
+	tempMetric.Datatype = &dt
+	tempMetric.Alias = &alias
+	tempMetric.Value = &pb.Payload_Metric_DoubleValue{DoubleValue: 22.5}
+
+	mt.deliver("spBv1.0/plant/NBIRTH/gw1", encodeBirth(0, 1, tempMetric))
+
+	aliasOnly := &pb.Payload_Metric{}
+	aliasOnly.Alias = &alias
+	dt2 := uint32(pb.DataType_Double)
+	aliasOnly.Datatype = &dt2
+	aliasOnly.Value = &pb.Payload_Metric_DoubleValue{DoubleValue: 30.0}
+
+	mt.deliver("spBv1.0/plant/NDATA/gw1", encodeData(1, aliasOnly))
+
+	ns := a.GetNode("plant", "gw1")
+	m := ns.Metrics["temperature"]
+	if m.GetDoubleValue() != 30.0 {
+		t.Fatalf("expected 30.0 via alias, got %f", m.GetDoubleValue())
+	}
+}
+
+func TestApplicationDDATAWithAlias(t *testing.T) {
+	mt := newMockTransport()
+	a, _ := New(mt, Config{BrokerURL: "tcp://localhost:1883"})
+
+	ctx := context.Background()
+	a.Connect(ctx)
+	defer a.Close(ctx)
+
+	mt.deliver("spBv1.0/plant/NBIRTH/gw1", encodeBirth(0, 1))
+
+	alias := uint64(77)
+	rpmMetric := &pb.Payload_Metric{}
+	rpmMetric.Name = strPtr("rpm")
+	dt := uint32(pb.DataType_Int32)
+	rpmMetric.Datatype = &dt
+	rpmMetric.Alias = &alias
+	rpmMetric.Value = &pb.Payload_Metric_IntValue{IntValue: 1500}
+
+	mt.deliver("spBv1.0/plant/DBIRTH/gw1/motor1", encodeData(1, rpmMetric))
+
+	aliasOnly := &pb.Payload_Metric{}
+	aliasOnly.Alias = &alias
+	dt2 := uint32(pb.DataType_Int32)
+	aliasOnly.Datatype = &dt2
+	aliasOnly.Value = &pb.Payload_Metric_IntValue{IntValue: 1800}
+
+	mt.deliver("spBv1.0/plant/DDATA/gw1/motor1", encodeData(2, aliasOnly))
+
+	ns := a.GetNode("plant", "gw1")
+	m := ns.Devices["motor1"].Metrics["rpm"]
+	if m.GetIntValue() != 1800 {
+		t.Fatalf("expected 1800 via alias, got %d", m.GetIntValue())
+	}
+}
+
+func TestApplicationResolveDeviceAlias(t *testing.T) {
+	mt := newMockTransport()
+	a, _ := New(mt, Config{BrokerURL: "tcp://localhost:1883"})
+
+	ctx := context.Background()
+	a.Connect(ctx)
+	defer a.Close(ctx)
+
+	mt.deliver("spBv1.0/plant/NBIRTH/gw1", encodeBirth(0, 1))
+
+	alias := uint64(55)
+	metric := &pb.Payload_Metric{}
+	metric.Name = strPtr("voltage")
+	dt := uint32(pb.DataType_Double)
+	metric.Datatype = &dt
+	metric.Alias = &alias
+	metric.Value = &pb.Payload_Metric_DoubleValue{DoubleValue: 230.0}
+
+	mt.deliver("spBv1.0/plant/DBIRTH/gw1/sensor1", encodeData(1, metric))
+
+	name, ok := a.ResolveAlias("plant", "gw1", 55)
+	if !ok || name != "voltage" {
+		t.Fatalf("expected voltage from device alias, got %s (ok=%v)", name, ok)
+	}
+}
+
+func TestApplicationDBIRTHNoNode(t *testing.T) {
+	mt := newMockTransport()
+	a, _ := New(mt, Config{BrokerURL: "tcp://localhost:1883"})
+
+	ctx := context.Background()
+	a.Connect(ctx)
+	defer a.Close(ctx)
+
+	mt.deliver("spBv1.0/plant/DBIRTH/unknown/dev1", encodeData(0))
+	// Should not panic — silently ignored
+}
+
+func TestApplicationDDEATHNoNode(t *testing.T) {
+	mt := newMockTransport()
+	a, _ := New(mt, Config{BrokerURL: "tcp://localhost:1883"})
+
+	ctx := context.Background()
+	a.Connect(ctx)
+	defer a.Close(ctx)
+
+	mt.deliver("spBv1.0/plant/DDEATH/unknown/dev1", encodeData(0))
+}
+
+func TestApplicationNDATANoNode(t *testing.T) {
+	mt := newMockTransport()
+	a, _ := New(mt, Config{BrokerURL: "tcp://localhost:1883"})
+
+	ctx := context.Background()
+	a.Connect(ctx)
+	defer a.Close(ctx)
+
+	m, _ := payload.NewMetric("temp", pb.DataType_Double, float64(22.0))
+	mt.deliver("spBv1.0/plant/NDATA/unknown", encodeData(0, m))
+}
+
+func TestApplicationDDATANoNode(t *testing.T) {
+	mt := newMockTransport()
+	a, _ := New(mt, Config{BrokerURL: "tcp://localhost:1883"})
+
+	ctx := context.Background()
+	a.Connect(ctx)
+	defer a.Close(ctx)
+
+	mt.deliver("spBv1.0/plant/DDATA/unknown/dev1", encodeData(0))
+}
+
+func TestApplicationDDATANoDevice(t *testing.T) {
+	mt := newMockTransport()
+	a, _ := New(mt, Config{BrokerURL: "tcp://localhost:1883"})
+
+	ctx := context.Background()
+	a.Connect(ctx)
+	defer a.Close(ctx)
+
+	mt.deliver("spBv1.0/plant/NBIRTH/gw1", encodeBirth(0, 1))
+	mt.deliver("spBv1.0/plant/DDATA/gw1/nonexistent", encodeData(1))
+}
+
+func TestApplicationMalformedPayload(t *testing.T) {
+	mt := newMockTransport()
+	a, _ := New(mt, Config{
+		BrokerURL: "tcp://localhost:1883",
+		Logger:    &testLogger{},
+	})
+
+	ctx := context.Background()
+	a.Connect(ctx)
+	defer a.Close(ctx)
+
+	garbage := []byte{0xFF, 0xFE, 0xFD}
+	mt.deliver("spBv1.0/plant/NBIRTH/gw1", garbage)
+	mt.deliver("spBv1.0/plant/NDEATH/gw1", garbage)
+	mt.deliver("spBv1.0/plant/DBIRTH/gw1/dev1", garbage)
+	mt.deliver("spBv1.0/plant/DDEATH/gw1/dev1", garbage)
+	mt.deliver("spBv1.0/plant/NDATA/gw1", garbage)
+	mt.deliver("spBv1.0/plant/DDATA/gw1/dev1", garbage)
+}
+
+func TestApplicationNDEATHNoNode(t *testing.T) {
+	mt := newMockTransport()
+	a, _ := New(mt, Config{BrokerURL: "tcp://localhost:1883"})
+
+	ctx := context.Background()
+	a.Connect(ctx)
+	defer a.Close(ctx)
+
+	mt.deliver("spBv1.0/plant/NDEATH/unknown", encodeDeath(0))
+}
+
+func TestApplicationResolveAliasNoNode(t *testing.T) {
+	mt := newMockTransport()
+	a, _ := New(mt, Config{BrokerURL: "tcp://localhost:1883"})
+
+	_, ok := a.ResolveAlias("nosuch", "nonode", 1)
+	if ok {
+		t.Fatal("expected false for non-existent node")
+	}
+}
+
+func TestApplicationWithLogger(t *testing.T) {
+	mt := newMockTransport()
+	logger := &testLogger{}
+	a, _ := New(mt, Config{
+		BrokerURL: "tcp://localhost:1883",
+		Logger:    logger,
+	})
+
+	ctx := context.Background()
+	a.Connect(ctx)
+	a.Disconnect(ctx)
+
+	if len(logger.infos) == 0 {
+		t.Fatal("expected logger info calls for state transitions")
+	}
+}
+
+type testLogger struct {
+	infos []string
+	warns []string
+}
+
+func (l *testLogger) Debugf(format string, args ...any) {}
+func (l *testLogger) Infof(format string, args ...any) {
+	l.infos = append(l.infos, fmt.Sprintf(format, args...))
+}
+func (l *testLogger) Warnf(format string, args ...any) {
+	l.warns = append(l.warns, fmt.Sprintf(format, args...))
+}
+func (l *testLogger) Errorf(format string, args ...any) {}
 
 func TestStateString(t *testing.T) {
 	tests := []struct {

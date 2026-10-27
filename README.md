@@ -196,6 +196,8 @@ Runnable examples are in the [`examples/`](examples/) directory:
 | [`examples/templates`](examples/templates) | Template definitions and instances with parameter overrides |
 | [`examples/datasets`](examples/datasets) | DataSet metrics with typed columnar data |
 | [`examples/application`](examples/application) | Application (non-host subscriber) with node/device event tracking |
+| [`examples/aliases`](examples/aliases) | Edge Node with metric aliases and alias resolution |
+| [`examples/commands`](examples/commands) | Host Application sending NCMD and DCMD commands to edge nodes |
 | [`examples/server-walking`](examples/server-walking) | Edge Node with multi-broker ServerURLs and primary host awareness |
 
 Run any example with:
@@ -286,7 +288,9 @@ go-sparkplugb
 │   ├── edge-node/        Edge Node lifecycle
 │   ├── host-app/         Host Application lifecycle
 │   ├── templates/        Template definitions and instances
+│   ├── aliases/          Metric aliases and alias resolution
 │   ├── application/      Application (non-host consumer)
+│   ├── commands/         Sending NCMD and DCMD commands
 │   ├── datasets/         DataSet columnar metrics
 │   └── server-walking/   Multi-broker server walking
 └── docs/
