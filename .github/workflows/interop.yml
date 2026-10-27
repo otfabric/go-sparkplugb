@@ -31,12 +31,12 @@ env:
   # Keep in step with interop/images.go (TestWorkflowPins). The brokers come
   # from Google's mirror of Docker Hub, by the same digests: anonymous Docker
   # Hub pulls are rate limited per runner address.
-  SPARKPLUGB_INTEROP_TAHU_IMAGE: ghcr.io/otfabric/sparkplugb-interop-tahu:v0.1.0
-  SPARKPLUGB_INTEROP_PYSPARKPLUG_IMAGE: ghcr.io/otfabric/sparkplugb-interop-pysparkplug:v0.1.0
-  SPARKPLUGB_INTEROP_SPARKPLUGNET_IMAGE: ghcr.io/otfabric/sparkplugb-interop-sparkplugnet:v0.1.0
-  SPARKPLUGB_INTEROP_SRAD_IMAGE: ghcr.io/otfabric/sparkplugb-interop-srad:v0.1.0
-  SPARKPLUGB_INTEROP_TAHU_JS_IMAGE: ghcr.io/otfabric/sparkplugb-interop-tahu-js:v0.1.0
-  SPARKPLUGB_INTEROP_SPARKPLUGHOST_IMAGE: ghcr.io/otfabric/sparkplugb-interop-sparkplughost:v0.1.0
+  SPARKPLUGB_INTEROP_TAHU_IMAGE: ghcr.io/otfabric/sparkplugb-interop-tahu:v0.1.0@sha256:913e97106f4ea9388b7688aca748bf96a6ae344fe5308207ebbbe200d8eaebcb
+  SPARKPLUGB_INTEROP_PYSPARKPLUG_IMAGE: ghcr.io/otfabric/sparkplugb-interop-pysparkplug:v0.1.0@sha256:7473b1ceb06e26a6a8541546fada998eb222ea9464d031ad56ab7a5badb36e44
+  SPARKPLUGB_INTEROP_SPARKPLUGNET_IMAGE: ghcr.io/otfabric/sparkplugb-interop-sparkplugnet:v0.1.0@sha256:919fce5b243a370656ddcb082ef95d0a4f001b991c7521ba3a06e64aa8a74a39
+  SPARKPLUGB_INTEROP_SRAD_IMAGE: ghcr.io/otfabric/sparkplugb-interop-srad:v0.1.0@sha256:dddf909f714c0b7d606871e7adb9bd4034d4cad6b0fbd3133dd00daf12662633
+  SPARKPLUGB_INTEROP_TAHU_JS_IMAGE: ghcr.io/otfabric/sparkplugb-interop-tahu-js:v0.1.0@sha256:d278a2eebb12c34a05a29a126fc17908e9b9058666ea9f26d1f475edd0401b3e
+  SPARKPLUGB_INTEROP_SPARKPLUGHOST_IMAGE: ghcr.io/otfabric/sparkplugb-interop-sparkplughost:v0.1.0@sha256:69265cbb76a542248b265db2c34ad3b5fc5add5d68a4adc85d91bdabd8a8cd60
   SPARKPLUGB_INTEROP_MOSQUITTO_IMAGE: mirror.gcr.io/library/eclipse-mosquitto:2.1.2-alpine@sha256:860aeb5d63ce509508f6dcfb2bc8a1c1dd2bc60555b562b45ce90e52d8dabb0f
   SPARKPLUGB_INTEROP_HIVEMQ_CE_IMAGE: mirror.gcr.io/hivemq/hivemq-ce:2026.5@sha256:bac6d4d1d815bffe4bc9a7fca8d06ea12b32d34f84ef2f1851ff4548560ee67b
   SPARKPLUGB_INTEROP_EMQX_IMAGE: mirror.gcr.io/emqx/emqx:6.3.2@sha256:135116400e11b25224350b2e55c874f4e224d357b593fb554ca1b1f398c631ac
