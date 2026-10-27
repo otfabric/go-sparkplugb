@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help all build fmt fmt-check lint lint-ci vet vuln test stress coverage cover coverage-gate fuzz generate generate-check cross check clean
+.PHONY: help all build fmt fmt-check lint lint-ci vet vuln test stress coverage cover coverage-gate fuzz generate generate-check cross check clean test-interop interop
 
 help: ## This help
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z0-9_-]+:.*?## / {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -100,6 +100,12 @@ generate: ## Regenerate Protobuf code
 
 generate-check: generate ## Fail if regenerating changes the committed code
 	@git diff --exit-code --stat -- proto/ || { echo "Generated code is out of date: run make generate and commit the result."; exit 1; }
+
+test-interop: ## Run the edge/host/app against the broker images pinned in interop/images.go (the interop module; needs Docker; INTEROP_TESTFLAGS=-v for every test)
+	@echo "Running interop tests"
+	@cd interop && go vet ./... && golangci-lint run ./... && go test -race -count=1 -timeout=30m $(INTEROP_TESTFLAGS) ./...
+
+interop: test-interop ## Alias for test-interop
 
 cross: ## Cross-compile for common platforms
 	GOOS=linux   GOARCH=amd64 go build ./...

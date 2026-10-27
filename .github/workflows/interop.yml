@@ -1,0 +1,97 @@
+name: Interop
+run-name: "Interop (${{ github.event_name }}) on ${{ github.ref_name }} by @${{ github.actor }}"
+
+# Runs go-sparkplugb's edge node, host application and application against the
+# MQTT brokers pinned in interop/images.go: Mosquitto, HiveMQ CE, EMQX and
+# NanoMQ. The images are consumed as published: nothing of sparkplugb-interop
+# is cloned or built here.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+  workflow_dispatch:
+    inputs:
+      mosquitto_image:
+        description: "Mosquitto image (default: the pinned release)"
+        required: false
+      hivemq_ce_image:
+        description: "HiveMQ CE image (default: the pinned release)"
+        required: false
+      emqx_image:
+        description: "EMQX image (default: the pinned release)"
+        required: false
+      nanomq_image:
+        description: "NanoMQ image (default: the pinned release)"
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  # Keep in step with interop/images.go.
+  SPARKPLUGB_INTEROP_MOSQUITTO_IMAGE: ${{ inputs.mosquitto_image || 'eclipse-mosquitto:2.0.21' }}
+  SPARKPLUGB_INTEROP_HIVEMQ_CE_IMAGE: ${{ inputs.hivemq_ce_image || 'hivemq/hivemq-ce:2024.5' }}
+  SPARKPLUGB_INTEROP_EMQX_IMAGE: ${{ inputs.emqx_image || 'emqx/emqx:5.8.6' }}
+  SPARKPLUGB_INTEROP_NANOMQ_IMAGE: ${{ inputs.nanomq_image || 'emqx/nanomq:0.21' }}
+  GOWORK: "off"
+
+jobs:
+  interop:
+    name: Mosquitto + HiveMQ CE + EMQX + NanoMQ
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: interop/go.mod
+          cache: true
+          cache-dependency-path: interop/go.sum
+
+      - name: Install linters
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/v2.15.0/install.sh | sh -s -- -b "$(go env GOPATH)/bin" v2.15.0
+
+      - name: Pull broker images
+        run: |
+          images=("${SPARKPLUGB_INTEROP_MOSQUITTO_IMAGE}" "${SPARKPLUGB_INTEROP_HIVEMQ_CE_IMAGE}" "${SPARKPLUGB_INTEROP_EMQX_IMAGE}" "${SPARKPLUGB_INTEROP_NANOMQ_IMAGE}")
+          for image in "${images[@]}"; do
+            for attempt in 1 2 3 4 5; do
+              docker pull "${image}" && break
+              [[ "${attempt}" == 5 ]] && { echo "::error::cannot pull ${image}"; exit 1; }
+              sleep $((attempt * 15))
+            done
+          done
+          {
+            echo "| Broker | Image |"
+            echo "|---|---|"
+            for image in "${images[@]}"; do
+              echo "| ${image%%:*} | \`${image}\` |"
+            done
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Run the interop suite
+        run: |
+          set -o pipefail
+          mkdir -p artifacts
+          make interop INTEROP_TESTFLAGS=-v 2>&1 | tee artifacts/interop.log
+
+      - name: Collect Docker diagnostics on failure
+        if: failure()
+        run: |
+          mkdir -p artifacts
+          docker ps -a > artifacts/docker-ps.txt || true
+          docker images --digests > artifacts/docker-images.txt || true
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: interop-logs
+          path: artifacts/
+          if-no-files-found: ignore
