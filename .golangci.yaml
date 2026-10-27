@@ -11,6 +11,15 @@ linters:
     - misspell
     - nilerr
 
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+    paths:
+      - examples
+      - proto
+
 formatters:
   enable:
     - gofmt
