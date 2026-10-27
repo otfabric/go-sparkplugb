@@ -1,9 +1,12 @@
 name: Interop
 run-name: "Interop (${{ github.event_name }}) on ${{ github.ref_name }} by @${{ github.actor }}"
 
-# Runs go-sparkplugb's edge node, host application and application against the
-# MQTT brokers pinned in interop/images.go: Mosquitto, HiveMQ CE, EMQX and
-# NanoMQ. The images are consumed as published: nothing of sparkplugb-interop
+# Runs go-sparkplugb's edge node, host application and application against
+# the reference implementations of otfabric/sparkplugb-interop (Eclipse Tahu,
+# pysparkplug, SparkplugNet, srad, Eclipse Tahu sparkplug-client,
+# sparkplughost), every role against every reference that has the other
+# role, on every fixture and on every pinned broker. The images are consumed
+# as published, by digest (interop/images.go): nothing of sparkplugb-interop
 # is cloned or built here.
 
 on:
@@ -11,37 +14,49 @@ on:
     branches: ["**"]
   pull_request:
     branches: ["**"]
+  schedule:
+    - cron: "23 4 * * *"
   workflow_dispatch:
     inputs:
-      mosquitto_image:
-        description: "Mosquitto image (default: the pinned release)"
-        required: false
-      hivemq_ce_image:
-        description: "HiveMQ CE image (default: the pinned release)"
-        required: false
-      emqx_image:
-        description: "EMQX image (default: the pinned release)"
-        required: false
-      nanomq_image:
-        description: "NanoMQ image (default: the pinned release)"
+      adapters:
+        description: "Comma-separated subset of the references (default: all)"
         required: false
 
 permissions:
   contents: read
 
 env:
-  # Keep in step with interop/images.go.
-  SPARKPLUGB_INTEROP_MOSQUITTO_IMAGE: ${{ inputs.mosquitto_image || 'eclipse-mosquitto:2.0.21' }}
-  SPARKPLUGB_INTEROP_HIVEMQ_CE_IMAGE: ${{ inputs.hivemq_ce_image || 'hivemq/hivemq-ce:2024.5' }}
-  SPARKPLUGB_INTEROP_EMQX_IMAGE: ${{ inputs.emqx_image || 'emqx/emqx:5.8.6' }}
-  SPARKPLUGB_INTEROP_NANOMQ_IMAGE: ${{ inputs.nanomq_image || 'emqx/nanomq:0.21' }}
   GOWORK: "off"
+  SPARKPLUGB_INTEROP_ADAPTERS: ${{ inputs.adapters }}
+  # Keep in step with interop/images.go (TestWorkflowPins). The brokers come
+  # from Google's mirror of Docker Hub, by the same digests: anonymous Docker
+  # Hub pulls are rate limited per runner address.
+  SPARKPLUGB_INTEROP_TAHU_IMAGE: ghcr.io/otfabric/sparkplugb-interop-tahu:v0.1.0
+  SPARKPLUGB_INTEROP_PYSPARKPLUG_IMAGE: ghcr.io/otfabric/sparkplugb-interop-pysparkplug:v0.1.0
+  SPARKPLUGB_INTEROP_SPARKPLUGNET_IMAGE: ghcr.io/otfabric/sparkplugb-interop-sparkplugnet:v0.1.0
+  SPARKPLUGB_INTEROP_SRAD_IMAGE: ghcr.io/otfabric/sparkplugb-interop-srad:v0.1.0
+  SPARKPLUGB_INTEROP_TAHU_JS_IMAGE: ghcr.io/otfabric/sparkplugb-interop-tahu-js:v0.1.0
+  SPARKPLUGB_INTEROP_SPARKPLUGHOST_IMAGE: ghcr.io/otfabric/sparkplugb-interop-sparkplughost:v0.1.0
+  SPARKPLUGB_INTEROP_MOSQUITTO_IMAGE: mirror.gcr.io/library/eclipse-mosquitto:2.1.2-alpine@sha256:860aeb5d63ce509508f6dcfb2bc8a1c1dd2bc60555b562b45ce90e52d8dabb0f
+  SPARKPLUGB_INTEROP_HIVEMQ_CE_IMAGE: mirror.gcr.io/hivemq/hivemq-ce:2026.5@sha256:bac6d4d1d815bffe4bc9a7fca8d06ea12b32d34f84ef2f1851ff4548560ee67b
+  SPARKPLUGB_INTEROP_EMQX_IMAGE: mirror.gcr.io/emqx/emqx:6.3.2@sha256:135116400e11b25224350b2e55c874f4e224d357b593fb554ca1b1f398c631ac
+  SPARKPLUGB_INTEROP_NANOMQ_IMAGE: mirror.gcr.io/emqx/nanomq:0.25.7@sha256:ed5a9bb892f58e59aa4e47a9932fb7e056f5ae57ba201414c793b8c961587784
+
+concurrency:
+  group: interop-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   interop:
-    name: Mosquitto + HiveMQ CE + EMQX + NanoMQ
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    name: ${{ matrix.broker }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        broker: [mosquitto, hivemq-ce, emqx, nanomq]
+    env:
+      SPARKPLUGB_INTEROP_BROKERS: ${{ matrix.broker }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -57,22 +72,26 @@ jobs:
         run: |
           curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/v2.15.0/install.sh | sh -s -- -b "$(go env GOPATH)/bin" v2.15.0
 
-      - name: Pull broker images
+      - name: Pull the reference and broker images
         run: |
-          images=("${SPARKPLUGB_INTEROP_MOSQUITTO_IMAGE}" "${SPARKPLUGB_INTEROP_HIVEMQ_CE_IMAGE}" "${SPARKPLUGB_INTEROP_EMQX_IMAGE}" "${SPARKPLUGB_INTEROP_NANOMQ_IMAGE}")
+          broker_var="SPARKPLUGB_INTEROP_$(echo "${{ matrix.broker }}" | tr 'a-z-' 'A-Z_')_IMAGE"
+          images=("${SPARKPLUGB_INTEROP_TAHU_IMAGE}" "${SPARKPLUGB_INTEROP_PYSPARKPLUG_IMAGE}" "${SPARKPLUGB_INTEROP_SPARKPLUGNET_IMAGE}"
+                  "${SPARKPLUGB_INTEROP_SRAD_IMAGE}" "${SPARKPLUGB_INTEROP_TAHU_JS_IMAGE}" "${SPARKPLUGB_INTEROP_SPARKPLUGHOST_IMAGE}"
+                  "${!broker_var}")
           for image in "${images[@]}"; do
             for attempt in 1 2 3 4 5; do
-              docker pull "${image}" && break
+              docker pull --quiet "${image}" && break
               [[ "${attempt}" == 5 ]] && { echo "::error::cannot pull ${image}"; exit 1; }
               sleep $((attempt * 15))
             done
           done
           {
-            echo "| Broker | Image |"
+            echo "| Image | Upstream |"
             echo "|---|---|"
-            for image in "${images[@]}"; do
-              echo "| ${image%%:*} | \`${image}\` |"
+            for image in "${images[@]::6}"; do
+              echo "| \`${image}\` | $(docker run --rm "${image}" print-capabilities | jq -r '"\(.upstream.name) \(.upstream.version)"') |"
             done
+            echo "| \`${!broker_var}\` | broker |"
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Run the interop suite
@@ -80,6 +99,7 @@ jobs:
           set -o pipefail
           mkdir -p artifacts
           make interop INTEROP_TESTFLAGS=-v 2>&1 | tee artifacts/interop.log
+          grep -E -- '--- (FAIL|SKIP)' artifacts/interop.log | tee -a "$GITHUB_STEP_SUMMARY" || true
 
       - name: Collect Docker diagnostics on failure
         if: failure()
@@ -88,10 +108,10 @@ jobs:
           docker ps -a > artifacts/docker-ps.txt || true
           docker images --digests > artifacts/docker-images.txt || true
 
-      - name: Upload failure artifacts
-        if: failure()
+      - name: Upload logs
+        if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: interop-logs
+          name: interop-${{ matrix.broker }}
           path: artifacts/
           if-no-files-found: ignore

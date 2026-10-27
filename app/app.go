@@ -14,6 +14,7 @@ import (
 	"github.com/otfabric/go-sparkplugb/payload"
 	pb "github.com/otfabric/go-sparkplugb/proto"
 	"github.com/otfabric/go-sparkplugb/topic"
+	"google.golang.org/protobuf/proto"
 )
 
 var (
@@ -96,6 +97,9 @@ type Application struct {
 	state   State
 	nodes   map[string]*EdgeNodeState
 	closeCh chan struct{}
+
+	unknownAsked map[string]time.Time // nodeKey -> last rebirth request for an unknown node
+	held         map[string][]heldMsg // nodeKey -> messages ahead of their sequence
 }
 
 func New(transport mqtt.Transport, cfg Config) (*Application, error) {
@@ -244,18 +248,22 @@ func (a *Application) RequestRebirth(ctx context.Context, groupID, nodeID string
 	})
 }
 
+// GetNode returns a snapshot of what is known about an edge node, or nil.
+// The snapshot is a copy: it does not change as messages arrive, and reading
+// it needs no locking.
 func (a *Application) GetNode(groupID, nodeID string) *EdgeNodeState {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return a.nodes[nodeKey(groupID, nodeID)]
+	return a.nodes[nodeKey(groupID, nodeID)].clone()
 }
 
+// Nodes returns a snapshot of every edge node known, as GetNode does.
 func (a *Application) Nodes() []*EdgeNodeState {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	out := make([]*EdgeNodeState, 0, len(a.nodes))
 	for _, n := range a.nodes {
-		out = append(out, n)
+		out = append(out, n.clone())
 	}
 	return out
 }
@@ -317,8 +325,20 @@ func (a *Application) handleMessage(topicStr string, data []byte) {
 		return
 	case topic.NBIRTH:
 		a.handleNBIRTH(t, data)
+		a.drain(t)
 	case topic.NDEATH:
 		a.handleNDEATH(t, data)
+	case topic.DBIRTH, topic.DDEATH, topic.NDATA, topic.DDATA:
+		if a.hold(t, data) {
+			return
+		}
+		a.dispatch(t, data)
+		a.drain(t)
+	}
+}
+
+func (a *Application) dispatch(t topic.Topic, data []byte) {
+	switch t.Type {
 	case topic.DBIRTH:
 		a.handleDBIRTH(t, data)
 	case topic.DDEATH:
@@ -327,6 +347,94 @@ func (a *Application) handleMessage(topicStr string, data []byte) {
 		a.handleNDATA(t, data)
 	case topic.DDATA:
 		a.handleDDATA(t, data)
+	}
+}
+
+// maxHeld is how many messages per edge node are held for reordering.
+const maxHeld = 256
+
+// heldMsg is a message that arrived ahead of its sequence number.
+type heldMsg struct {
+	t    topic.Topic
+	seq  uint64
+	data []byte
+	at   time.Time
+}
+
+// hold keeps a message that cannot be applied yet: one from an edge node
+// whose NBIRTH has not arrived, or one ahead of the next sequence number.
+// MQTT orders messages per topic only, so a broker may deliver the messages
+// of one edge node out of publishing order (NanoMQ does); they are applied in
+// sequence order once the gap is filled (see drain). A rebirth is requested
+// as for a message that is lost. A message behind the expected sequence
+// number is not held: the handlers treat it as a gap.
+func (a *Application) hold(t topic.Topic, data []byte) bool {
+	p, err := payload.Decode(data)
+	if err != nil {
+		return false // the handler reports it
+	}
+	seq := p.GetSeq()
+	key := nodeKey(t.GroupID, t.EdgeNodeID)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	ns := a.nodes[key]
+	if ns != nil {
+		expected := (ns.LastSeq + 1) % 256
+		if seq == expected || (seq-expected+256)%256 > 128 {
+			return false
+		}
+	}
+	if a.held == nil {
+		a.held = make(map[string][]heldMsg)
+	}
+	if len(a.held[key]) >= maxHeld {
+		return false
+	}
+	a.held[key] = append(a.held[key], heldMsg{t: t, seq: seq, data: data, at: time.Now()})
+	if ns == nil {
+		a.unknownNode(t)
+	} else {
+		a.validateSeq(ns, seq, t) // starts the reorder timer or requests a rebirth
+	}
+	return true
+}
+
+// heldMaxAge is how long a held message may wait for the gap before it.
+const heldMaxAge = 30 * time.Second
+
+// drain applies the held messages of the edge node that are next in
+// sequence, one after the other, and drops those that waited too long.
+func (a *Application) drain(t topic.Topic) {
+	key := nodeKey(t.GroupID, t.EdgeNodeID)
+	for {
+		a.mu.Lock()
+		ns, held := a.nodes[key], a.held[key]
+		if ns == nil || len(held) == 0 {
+			a.mu.Unlock()
+			return
+		}
+		expected := (ns.LastSeq + 1) % 256
+		var (
+			next  *heldMsg
+			kept  = make([]heldMsg, 0, len(held))
+			found bool
+		)
+		for i := range held {
+			switch {
+			case !found && held[i].seq == expected:
+				next, found = &held[i], true
+			case time.Since(held[i].at) > heldMaxAge:
+			default:
+				kept = append(kept, held[i])
+			}
+		}
+		a.held[key] = kept
+		a.mu.Unlock()
+		if !found {
+			return
+		}
+		m := *next
+		a.dispatch(m.t, m.data)
 	}
 }
 
@@ -412,6 +520,9 @@ func (a *Application) handleDBIRTH(t topic.Topic, data []byte) {
 
 	a.mu.Lock()
 	ns := a.nodes[nodeKey(t.GroupID, t.EdgeNodeID)]
+	if ns == nil {
+		a.unknownNode(t)
+	}
 	if ns != nil {
 		if !a.validateSeq(ns, p.GetSeq(), t) {
 			a.mu.Unlock()
@@ -447,6 +558,9 @@ func (a *Application) handleDDEATH(t topic.Topic, data []byte) {
 
 	a.mu.Lock()
 	ns := a.nodes[nodeKey(t.GroupID, t.EdgeNodeID)]
+	if ns == nil {
+		a.unknownNode(t)
+	}
 	if ns != nil {
 		if !a.validateSeq(ns, p.GetSeq(), t) {
 			a.mu.Unlock()
@@ -473,6 +587,9 @@ func (a *Application) handleNDATA(t topic.Topic, data []byte) {
 
 	a.mu.Lock()
 	ns := a.nodes[nodeKey(t.GroupID, t.EdgeNodeID)]
+	if ns == nil {
+		a.unknownNode(t)
+	}
 	if ns != nil {
 		if !a.validateSeq(ns, p.GetSeq(), t) {
 			a.mu.Unlock()
@@ -481,7 +598,7 @@ func (a *Application) handleNDATA(t topic.Topic, data []byte) {
 		for _, m := range p.Metrics {
 			name := resolveMetricName(ns, m)
 			if name != "" {
-				ns.Metrics[name] = m
+				ns.Metrics[name] = withBirth(ns.Metrics[name], m, name)
 			}
 		}
 	}
@@ -501,6 +618,9 @@ func (a *Application) handleDDATA(t topic.Topic, data []byte) {
 
 	a.mu.Lock()
 	ns := a.nodes[nodeKey(t.GroupID, t.EdgeNodeID)]
+	if ns == nil {
+		a.unknownNode(t)
+	}
 	if ns != nil {
 		if !a.validateSeq(ns, p.GetSeq(), t) {
 			a.mu.Unlock()
@@ -510,7 +630,7 @@ func (a *Application) handleDDATA(t topic.Topic, data []byte) {
 			for _, m := range p.Metrics {
 				name := resolveDeviceMetricName(ds, m)
 				if name != "" {
-					ds.Metrics[name] = m
+					ds.Metrics[name] = withBirth(ds.Metrics[name], m, name)
 				}
 			}
 		}
@@ -568,4 +688,74 @@ func (a *Application) logWarn(format string, args ...any) {
 
 func nodeKey(groupID, nodeID string) string {
 	return groupID + "/" + nodeID
+}
+
+// withBirth returns the data metric m as the state keeps it: under its name
+// and with the datatype of the birth when m carries only an alias or no
+// datatype, as Sparkplug allows after the birth. m is not modified.
+func withBirth(prev, m *pb.Payload_Metric, name string) *pb.Payload_Metric {
+	c := proto.Clone(m).(*pb.Payload_Metric)
+	c.Name = &name
+	if c.Datatype == nil && prev != nil && prev.Datatype != nil {
+		dt := prev.GetDatatype()
+		c.Datatype = &dt
+	}
+	return c
+}
+
+// clone returns a deep copy of the state, nil for nil.
+func (s *EdgeNodeState) clone() *EdgeNodeState {
+	if s == nil {
+		return nil
+	}
+	c := *s
+	c.Metrics = cloneMetrics(s.Metrics)
+	c.Aliases = make(map[uint64]string, len(s.Aliases))
+	for k, v := range s.Aliases {
+		c.Aliases[k] = v
+	}
+	c.Devices = make(map[string]*DeviceState, len(s.Devices))
+	for id, d := range s.Devices {
+		dc := *d
+		dc.Metrics = cloneMetrics(d.Metrics)
+		dc.Aliases = make(map[uint64]string, len(d.Aliases))
+		for k, v := range d.Aliases {
+			dc.Aliases[k] = v
+		}
+		c.Devices[id] = &dc
+	}
+	return &c
+}
+
+func cloneMetrics(in map[string]*pb.Payload_Metric) map[string]*pb.Payload_Metric {
+	out := make(map[string]*pb.Payload_Metric, len(in))
+	for k, m := range in {
+		out[k] = proto.Clone(m).(*pb.Payload_Metric)
+	}
+	return out
+}
+
+// unknownRebirthInterval is how often at most a rebirth is requested from an
+// edge node whose NBIRTH has not been seen.
+const unknownRebirthInterval = 2 * time.Second
+
+// unknownNode requests a rebirth from an edge node that sent a message
+// before any NBIRTH was seen: a host joining while the node is online, or an
+// NBIRTH that a broker delivered after the messages that followed it (MQTT
+// orders messages per topic only). Called with a.mu held.
+func (a *Application) unknownNode(t topic.Topic) {
+	key := nodeKey(t.GroupID, t.EdgeNodeID)
+	if a.unknownAsked == nil {
+		a.unknownAsked = make(map[string]time.Time)
+	}
+	if last, ok := a.unknownAsked[key]; ok && time.Since(last) < unknownRebirthInterval {
+		return
+	}
+	a.unknownAsked[key] = time.Now()
+	a.logWarn("%s from %s/%s before its NBIRTH: requesting rebirth", t.Type, t.GroupID, t.EdgeNodeID)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = a.RequestRebirth(ctx, t.GroupID, t.EdgeNodeID)
+	}()
 }

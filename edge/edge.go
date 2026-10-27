@@ -15,6 +15,7 @@ import (
 	"github.com/otfabric/go-sparkplugb/payload"
 	pb "github.com/otfabric/go-sparkplugb/proto"
 	"github.com/otfabric/go-sparkplugb/topic"
+	"google.golang.org/protobuf/proto"
 )
 
 var (
@@ -234,13 +235,15 @@ func (n *Node) Connect(ctx context.Context) error {
 	}
 
 	if n.cfg.PrimaryHostID != "" {
+		// Waiting before subscribing: the retained STATE can arrive before
+		// Subscribe returns, and it only counts while the node waits for it.
+		n.mu.Lock()
+		n.setState(WaitingForPrimaryHost)
+		n.mu.Unlock()
 		stateTopic := topic.ForState(n.cfg.PrimaryHostID)
 		if err := n.transport.Subscribe(ctx, stateTopic, 1, n.makeStateHandler(connGen)); err != nil {
 			return fmt.Errorf("sparkplugb: subscribe STATE: %w", err)
 		}
-		n.mu.Lock()
-		n.setState(WaitingForPrimaryHost)
-		n.mu.Unlock()
 	} else {
 		n.mu.Lock()
 		n.setState(Online)
@@ -277,8 +280,13 @@ func (n *Node) PublishBirth(ctx context.Context, nodeMetrics []*pb.Payload_Metri
 
 	payload.StampMetrics(nodeMetrics)
 
-	birthMetrics := make([]*pb.Payload_Metric, 0, len(nodeMetrics)+1)
+	birthMetrics := make([]*pb.Payload_Metric, 0, len(nodeMetrics)+2)
 	birthMetrics = append(birthMetrics, payload.BdSeqMetric(bdSeq))
+	// Sparkplug 3.0.0 requires "Node Control/Rebirth" in every NBIRTH, so
+	// that a host knows it can ask for one. Added unless the caller has it.
+	if !hasMetric(nodeMetrics, rebirthMetricName) {
+		birthMetrics = append(birthMetrics, payload.RebirthMetric(false))
+	}
 	birthMetrics = append(birthMetrics, nodeMetrics...)
 
 	p := payload.NewPayload(seq, birthMetrics...)
@@ -321,6 +329,7 @@ func (n *Node) PublishNodeData(ctx context.Context, metrics []*pb.Payload_Metric
 		n.mu.Unlock()
 		return ErrNoBirth
 	}
+	n.birthMetrics = n.withCurrent(n.birthMetrics, metrics)
 	n.seq = (n.seq + 1) % 256
 	seq := n.seq
 	n.mu.Unlock()
@@ -335,6 +344,9 @@ func (n *Node) PublishDeviceData(ctx context.Context, deviceID string, metrics [
 	if !n.born {
 		n.mu.Unlock()
 		return ErrNoBirth
+	}
+	if dev, ok := n.devices[deviceID]; ok {
+		dev.Metrics = n.withCurrent(dev.Metrics, metrics)
 	}
 	n.seq = (n.seq + 1) % 256
 	seq := n.seq
@@ -560,9 +572,44 @@ func (n *Node) handleMessage(topicStr string, data []byte) {
 	}
 }
 
+const rebirthMetricName = "Node Control/Rebirth"
+
+// withCurrent returns the birth metrics with the values of the data metrics
+// that name them, by name or by alias, so that a rebirth publishes current
+// values as Sparkplug requires. The birth keeps its names, aliases and
+// datatypes; neither slice is modified. Called with n.mu held.
+func (n *Node) withCurrent(birth, data []*pb.Payload_Metric) []*pb.Payload_Metric {
+	out := make([]*pb.Payload_Metric, len(birth))
+	copy(out, birth)
+	for _, d := range data {
+		name := d.GetName()
+		if name == "" && d.Alias != nil {
+			name = n.aliases[d.GetAlias()]
+		}
+		for i, b := range out {
+			if name == "" || b.GetName() != name {
+				continue
+			}
+			c := proto.Clone(d).(*pb.Payload_Metric)
+			c.Name, c.Alias, c.Datatype = b.Name, b.Alias, b.Datatype
+			out[i] = c
+		}
+	}
+	return out
+}
+
+func hasMetric(metrics []*pb.Payload_Metric, name string) bool {
+	for _, m := range metrics {
+		if m.GetName() == name {
+			return true
+		}
+	}
+	return false
+}
+
 func (n *Node) handleNCMD(p *pb.Payload) {
 	for _, m := range p.Metrics {
-		if m.GetName() == "Node Control/Rebirth" && m.GetBooleanValue() {
+		if m.GetName() == rebirthMetricName && m.GetBooleanValue() {
 			n.cfg.Logger.Infof("rebirth requested")
 			n.rebirthMu.Lock()
 			if !n.rebirthPending {

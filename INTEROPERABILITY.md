@@ -1,0 +1,91 @@
+# Interoperability: otfabric/go-sparkplugb
+
+What the library does on the wire where Sparkplug B 3.0.0 leaves room or
+implementations disagree, and how it was verified against independent
+implementations. [docs/CONFORMANCE.md](docs/CONFORMANCE.md) maps the
+normative requirements clause by clause.
+
+## On the wire
+
+| Item | go-sparkplugb |
+|------|---------------|
+| MQTT | 3.1.1 (Eclipse Paho): TCP, TLS (`TLSConfig`) or WebSocket, by the scheme of the broker URL |
+| Namespace | `spBv1.0` |
+| STATE | Sparkplug 3.0 (`spBv1.0/STATE/<host id>`, JSON `{"online", "timestamp"}`, QoS 1, retained) |
+| Int8, Int16 encoded as | `int_value` sign-extended to 32 bits (as Eclipse Tahu and SparkplugNet) |
+| Int8, Int16 decoded from | either form: sign-extended or width-sized (as pysparkplug and srad send it) |
+| UInt32 encoded as | `int_value` (protobuf `uint32`, as the specification says) |
+| Integers decoded from | `int_value` or `long_value`, whichever carries the value (Eclipse Tahu puts UInt32 in `long_value`) |
+| Datatype in NDATA, DDATA, NCMD, DCMD | as the caller builds the metric (`payload.NewMetric` sets it); a received metric without one takes the datatype of its birth |
+| `seq` in NCMD and DCMD | never sent |
+| Metric timestamp | on every metric of NBIRTH, DBIRTH, NDATA and DDATA |
+| NBIRTH | `bdSeq`, `Node Control/Rebirth` (Boolean, false), then the node metrics |
+| Aliases | assigned by the caller; data may carry the alias only |
+
+## Host and application behaviour
+
+| Situation | What the host (package `host`) and the application (package `app`) do |
+|-----------|-------------------------------------------------------------|
+| Messages of a node out of `seq` order | Held, at most 256 per node and 30 seconds, and applied in `seq` order once the gap is filled. MQTT orders messages per topic only, and NanoMQ and HiveMQ CE do deliver a node's DBIRTH before its NBIRTH and data out of order |
+| A gap that is not filled | NCMD `Node Control/Rebirth` after `ReorderTimeout` (host) |
+| Data or DBIRTH from a node without a birth | NCMD `Node Control/Rebirth`, at most once per node every 2 seconds |
+| NDEATH whose `bdSeq` is not the birth's | Ignored: it is the will of an earlier session, which a broker may deliver late |
+| Data metric with only an alias | Stored by the name and datatype of its birth |
+| `GetNode`, `Nodes` | Return copies, safe to read while messages arrive |
+
+## Verification status
+
+Besides its own tests, the library is run on every push against six
+independent implementations, in every role they have, on four MQTT brokers.
+The reference builds are the images of
+[otfabric/sparkplugb-interop v0.1.0](https://github.com/otfabric/sparkplugb-interop/releases/tag/v0.1.0),
+pinned in [interop/images.go](interop/images.go):
+
+| Reference | Version | go-sparkplugb host and application ← reference edge | go-sparkplugb edge → reference host |
+|-----------|---------|------------------------------------------------------|-------------------------------------|
+| Eclipse Tahu (Java) | 1.0.21 | pass | pass |
+| pysparkplug | 0.6.1 | pass ¹ | pass ² ⁵ |
+| SparkplugNet | 1.4.1 | pass ³ | pass ⁴ |
+| srad | 0.5.0 | pass | pass ⁵ |
+| Eclipse Tahu sparkplug-client (JavaScript) | 3.2.4 | pass | (edge only) |
+| EvergenEnergy/sparkplughost | v0.4.0 | (host only) | pass ⁵ |
+
+on Eclipse Mosquitto 2.1.2, HiveMQ CE 2026.5, EMQX 6.3.2 and NanoMQ 0.25.7.
+
+¹ pysparkplug's NDEATH on a clean stop carries `bdSeq + 1`, so the
+node does not go offline on it; the will after a crash is checked instead.
+² pysparkplug's host cannot decode a negative Int8 or Int16 sign-extended to
+32 bits, as go-sparkplugb (and Tahu) encode it: the scalars fixture is
+skipped.
+³ without device writes: SparkplugNet's edge drops a DCMD for a device.
+⁴ without the steps after a death: SparkplugNet's host keeps dead nodes and
+devices online.
+⁵ not on NanoMQ and HiveMQ CE: these hosts apply messages in arrival order,
+and the brokers reorder messages across topics in some runs.
+
+A reference that lacks a capability (a datatype, a call, a feature) skips
+the steps that need it; each skip and known upstream bug is logged with its
+reason. The upstream bugs are described in
+[sparkplugb-interop's COMPATIBILITY.md](https://github.com/otfabric/sparkplugb-interop/blob/main/docs/COMPATIBILITY.md).
+
+The suite (`make interop`, module `interop/`):
+
+- **TestHost**, the go-sparkplugb host against each reference edge on each
+  fixture: births, aliases, every update, writes by NCMD and DCMD, rebirth on
+  request and by call, device death and birth, NDEATH on a clean stop, the
+  will after a crash, and the edge's view of the primary host going offline.
+- **TestApplication**, the go-sparkplugb application (no STATE) against each
+  reference edge: births, updates, device death and birth, and the node's
+  death.
+- **TestEdge**, the go-sparkplugb edge against each reference host: births with
+  aliases, alias-only data, the host's view of the node, commands, rebirth on
+  request, device death and birth, NDEATH, the will, and the primary host's
+  STATE going offline.
+
+The two fixtures cover a node with two devices and writable metrics, and all
+fourteen scalar datatypes at their limits. Templates, DataSets, arrays and
+properties are covered by this repository's codec tests only: no fixture of
+the reference images has them.
+
+It has **not** been run against the Sparkplug TCK or commercial
+implementations. Interoperability reports are welcome.

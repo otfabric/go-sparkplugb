@@ -101,7 +101,7 @@ generate: ## Regenerate Protobuf code
 generate-check: generate ## Fail if regenerating changes the committed code
 	@git diff --exit-code --stat -- proto/ || { echo "Generated code is out of date: run make generate and commit the result."; exit 1; }
 
-test-interop: ## Run the edge/host/app against the broker images pinned in interop/images.go (the interop module; needs Docker; INTEROP_TESTFLAGS=-v for every test)
+test-interop: ## Run the edge/host/app against the sparkplugb-interop references and brokers pinned in interop/images.go (needs Docker; INTEROP_TESTFLAGS=-v)
 	@echo "Running interop tests"
 	@cd interop && go vet ./... && golangci-lint run ./... && go test -race -count=1 -timeout=30m $(INTEROP_TESTFLAGS) ./...
 

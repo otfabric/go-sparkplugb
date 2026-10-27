@@ -350,3 +350,23 @@ func TestFileType(t *testing.T) {
 		t.Errorf("got %v, want %v", got, data)
 	}
 }
+
+func TestIntegerInLongValue(t *testing.T) {
+	// Eclipse Tahu encodes UInt32 in long_value instead of int_value.
+	for _, tc := range []struct {
+		dt   pb.DataType
+		long uint64
+		want any
+	}{
+		{pb.DataType_UInt32, 4000000000, uint32(4000000000)},
+		{pb.DataType_Int32, uint64(math.MaxUint64 - 9), int32(-10)},
+		{pb.DataType_Int8, uint64(math.MaxUint64), int8(-1)},
+	} {
+		dt := uint32(tc.dt)
+		m := &pb.Payload_Metric{Datatype: &dt, Value: &pb.Payload_Metric_LongValue{LongValue: tc.long}}
+		got, err := GetValue(m)
+		if err != nil || got != tc.want {
+			t.Errorf("%v in long_value %d: got %v (%T), %v; want %v", tc.dt, tc.long, got, got, err, tc.want)
+		}
+	}
+}

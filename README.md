@@ -265,6 +265,16 @@ re-publish NBIRTH. Custom `mqtt.Transport` implementations report this by
 calling `ConnectOpts.OnConnectionLost` with an error wrapping
 `mqtt.ErrConnectionLost`.
 
+### Interoperability
+
+Every role is tested against independent implementations: the edge node
+against the host applications of Eclipse Tahu, pysparkplug, SparkplugNet, srad
+and sparkplughost; the host application and the application against the edge
+nodes of Eclipse Tahu, pysparkplug, SparkplugNet, srad and Eclipse Tahu
+sparkplug-client; on every fixture and on Mosquitto, HiveMQ CE, EMQX and
+NanoMQ. See [INTEROPERABILITY.md](INTEROPERABILITY.md) for the matrix and the
+upstream bugs it found.
+
 ---
 
 ## Specification Conformance
@@ -317,7 +327,7 @@ go-sparkplugb
 | `make lint` | Run golangci-lint |
 | `make build` | Build examples |
 | `make check` | Lint + test + coverage gate (90%) |
-| `make interop` | Edge/host/app against Mosquitto, HiveMQ CE, EMQX and NanoMQ in Docker (`interop/` module) |
+| `make interop` | Edge, host and application against the six reference stacks of sparkplugb-interop, on Mosquitto, HiveMQ CE, EMQX and NanoMQ (`interop/` module, Docker) |
 
 ```bash
 git clone https://github.com/otfabric/go-sparkplugb.git
@@ -330,7 +340,7 @@ make check
 | Repository | Description |
 |-----------|-------------|
 | [sparkplugbctl](https://github.com/otfabric/sparkplugbctl) | CLI for monitoring, publishing, simulating and debugging Sparkplug B infrastructure |
-| [sparkplugb-interop](https://github.com/otfabric/sparkplugb-interop) | Docker-based interoperability and chaos testing against Mosquitto, HiveMQ, EMQX and NanoMQ |
+| [sparkplugb-interop](https://github.com/otfabric/sparkplugb-interop) | Reference Sparkplug B edge nodes and host applications (Eclipse Tahu, pysparkplug, SparkplugNet, srad, sparkplug-client, sparkplughost) as fixture-driven containers, which `make interop` runs this library against |
 
 ## License
 

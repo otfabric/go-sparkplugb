@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -171,8 +172,30 @@ func TestConnectAndBirth(t *testing.T) {
 	if p.GetSeq() != 0 {
 		t.Errorf("NBIRTH seq = %d, want 0", p.GetSeq())
 	}
+	if len(p.Metrics) != 3 {
+		t.Fatalf("expected 3 metrics (bdSeq, Node Control/Rebirth, temperature), got %d", len(p.Metrics))
+	}
+	if r := p.Metrics[1]; r.GetName() != "Node Control/Rebirth" || r.GetBooleanValue() {
+		t.Errorf("second NBIRTH metric = %v, want Node Control/Rebirth false", r)
+	}
+}
+
+func TestBirthKeepsCallerRebirthMetric(t *testing.T) {
+	tr := newMockTransport()
+	n, _ := New(tr, testConfig())
+	ctx := context.Background()
+	if err := n.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.PublishBirth(ctx, []*pb.Payload_Metric{payload.RebirthMetric(false)}); err != nil {
+		t.Fatal(err)
+	}
+	p, err := payload.Decode(tr.getPublished()[0].Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(p.Metrics) != 2 {
-		t.Fatalf("expected 2 metrics (bdSeq + temperature), got %d", len(p.Metrics))
+		t.Fatalf("NBIRTH has %d metrics, want bdSeq and the caller's Node Control/Rebirth", len(p.Metrics))
 	}
 }
 
@@ -1340,5 +1363,76 @@ func TestConnectionLost(t *testing.T) {
 	}
 	if n.State() != Online {
 		t.Fatalf("state after reconnect = %s, want online", n.State())
+	}
+}
+
+func TestRebirthPublishesCurrentValues(t *testing.T) {
+	tr := newMockTransport()
+	n, _ := New(tr, testConfig())
+	ctx := context.Background()
+	if err := n.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	x, _ := payload.NewMetricWithAlias("x", 1, pb.DataType_Int32, int32(0))
+	if err := n.PublishBirth(ctx, []*pb.Payload_Metric{x}); err != nil {
+		t.Fatal(err)
+	}
+	y, _ := payload.NewMetric("y", pb.DataType_Double, float64(1))
+	if err := n.PublishDeviceBirth(ctx, "dev1", []*pb.Payload_Metric{y}); err != nil {
+		t.Fatal(err)
+	}
+	// Node data by alias only, device data by name.
+	nx, _ := payload.NewAliasMetric(1, pb.DataType_Int32, int32(7))
+	if err := n.PublishNodeData(ctx, []*pb.Payload_Metric{nx}); err != nil {
+		t.Fatal(err)
+	}
+	ny, _ := payload.NewMetric("y", pb.DataType_Double, float64(2.5))
+	if err := n.PublishDeviceData(ctx, "dev1", []*pb.Payload_Metric{ny}); err != nil {
+		t.Fatal(err)
+	}
+	before := len(tr.getPublished())
+	if err := n.Rebirth(ctx); err != nil {
+		t.Fatal(err)
+	}
+	msgs := tr.getPublished()[before:]
+	nb, _ := payload.Decode(msgs[0].Payload)
+	var got *pb.Payload_Metric
+	for _, m := range nb.Metrics {
+		if m.GetName() == "x" {
+			got = m
+		}
+	}
+	if got == nil || got.GetAlias() != 1 || got.GetIntValue() != 7 || pb.DataType(got.GetDatatype()) != pb.DataType_Int32 {
+		t.Errorf("NBIRTH of the rebirth has x = %v, want alias 1, Int32 7", got)
+	}
+	db, _ := payload.Decode(msgs[1].Payload)
+	if v := db.Metrics[0]; v.GetName() != "y" || v.GetDoubleValue() != 2.5 {
+		t.Errorf("DBIRTH of the rebirth has %v, want y = 2.5", v)
+	}
+}
+
+// retainedTransport delivers the retained STATE of the primary host while
+// Subscribe is still running, as a fast broker does.
+type retainedTransport struct{ *mockTransport }
+
+func (r retainedTransport) Subscribe(ctx context.Context, t string, qos byte, h mqtt.MessageHandler) error {
+	if err := r.mockTransport.Subscribe(ctx, t, qos, h); err != nil {
+		return err
+	}
+	if strings.HasPrefix(t, "spBv1.0/STATE/") {
+		h(t, []byte(`{"online":true,"timestamp":1}`))
+	}
+	return nil
+}
+
+func TestPrimaryHostStateDuringSubscribe(t *testing.T) {
+	cfg := testConfig()
+	cfg.PrimaryHostID = "scada"
+	n, _ := New(retainedTransport{newMockTransport()}, cfg)
+	if err := n.Connect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if n.State() != Online {
+		t.Fatalf("state %s: the retained STATE online arrived during Subscribe and must count", n.State())
 	}
 }

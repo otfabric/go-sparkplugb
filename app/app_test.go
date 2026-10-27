@@ -342,7 +342,10 @@ func TestApplicationTracksDeviceBirthDeath(t *testing.T) {
 	}
 
 	mt.deliver("spBv1.0/plant/DDEATH/gw1/motor1", encodeData(2))
-	ds = ns.Devices["motor1"]
+	if !ds.Online {
+		t.Fatal("a snapshot must not change after GetNode")
+	}
+	ds = a.GetNode("plant", "gw1").Devices["motor1"]
 	if ds.Online {
 		t.Fatal("device should be offline")
 	}
@@ -940,5 +943,76 @@ func TestApplicationConnectionLost(t *testing.T) {
 	mt.opts.OnConnectionLost(mqtt.ErrConnectionLost)
 	if a.State() != Disconnected {
 		t.Fatalf("state = %s, want disconnected", a.State())
+	}
+}
+
+func TestApplicationAppliesReorderedMessagesInSequence(t *testing.T) {
+	mt := newMockTransport()
+	a, _ := New(mt, Config{BrokerURL: "tcp://localhost:1883"})
+	ctx := context.Background()
+	_ = a.Connect(ctx)
+	defer a.Close(ctx)
+
+	x := func(v int32) *pb.Payload_Metric { m, _ := payload.NewMetric("x", pb.DataType_Int32, v); return m }
+	y := func(v int32) *pb.Payload_Metric { m, _ := payload.NewMetric("y", pb.DataType_Int32, v); return m }
+
+	// Published as NBIRTH 0, DBIRTH 1, NDATA 2, DDATA 3, NDATA 4; delivered
+	// with the DBIRTH before the NBIRTH and NDATA 4 before NDATA 2.
+	mt.deliver("spBv1.0/g1/DBIRTH/n1/d1", encodeData(1, y(10)))
+	mt.deliver("spBv1.0/g1/NBIRTH/n1", encodeBirth(0, 0, x(1)))
+	mt.deliver("spBv1.0/g1/NDATA/n1", encodeData(4, x(3)))
+	mt.deliver("spBv1.0/g1/DDATA/n1/d1", encodeData(3, y(11)))
+	mt.deliver("spBv1.0/g1/NDATA/n1", encodeData(2, x(2)))
+
+	ns := a.GetNode("g1", "n1")
+	if ns == nil || ns.Devices["d1"] == nil {
+		t.Fatalf("node or device not tracked: %+v", ns)
+	}
+	if ns.LastSeq != 4 {
+		t.Errorf("LastSeq = %d, want 4: every message applied", ns.LastSeq)
+	}
+	if v, _ := payload.GetValue(ns.Metrics["x"]); v != int32(3) {
+		t.Errorf("x = %v, want 3 (the value of the last NDATA in sequence)", v)
+	}
+	if v, _ := payload.GetValue(ns.Devices["d1"].Metrics["y"]); v != int32(11) {
+		t.Errorf("y = %v, want 11", v)
+	}
+}
+
+func TestApplicationDropsHeldMessagesThatWaitedTooLong(t *testing.T) {
+	mt := newMockTransport()
+	a, _ := New(mt, Config{BrokerURL: "tcp://localhost:1883"})
+	ctx := context.Background()
+	_ = a.Connect(ctx)
+	defer a.Close(ctx)
+
+	x := func(v int32) *pb.Payload_Metric { m, _ := payload.NewMetric("x", pb.DataType_Int32, v); return m }
+	mt.deliver("spBv1.0/g1/NBIRTH/n1", encodeBirth(0, 0, x(1)))
+	mt.deliver("spBv1.0/g1/NDATA/n1", encodeData(3, x(3))) // ahead: held
+	mt.deliver("spBv1.0/g1/NDATA/n1", encodeData(5, x(5))) // ahead: held
+
+	a.mu.Lock()
+	held := a.held[nodeKey("g1", "n1")]
+	if len(held) != 2 {
+		a.mu.Unlock()
+		t.Fatalf("held %d messages, want 2", len(held))
+	}
+	held[1].at = time.Now().Add(-2 * heldMaxAge)
+	a.mu.Unlock()
+
+	mt.deliver("spBv1.0/g1/NDATA/n1", encodeData(1, x(10)))
+	mt.deliver("spBv1.0/g1/NDATA/n1", encodeData(2, x(2)))
+
+	ns := a.GetNode("g1", "n1")
+	if ns.LastSeq != 3 {
+		t.Errorf("LastSeq = %d, want 3: seq 3 applied, seq 5 dropped", ns.LastSeq)
+	}
+	if v, _ := payload.GetValue(ns.Metrics["x"]); v != int32(3) {
+		t.Errorf("x = %v, want 3", v)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if n := len(a.held[nodeKey("g1", "n1")]); n != 0 {
+		t.Errorf("%d messages still held, want 0", n)
 	}
 }

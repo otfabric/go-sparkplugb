@@ -1213,3 +1213,163 @@ func TestHostConnectionLost(t *testing.T) {
 		t.Fatalf("state = %s, want disconnected", app.State())
 	}
 }
+
+func TestHostAliasDataKeepsBirthNameAndDatatype(t *testing.T) {
+	tr := newMockTransport()
+	app, _ := New(tr, testConfig())
+	ctx := context.Background()
+	_ = app.Connect(ctx)
+
+	temp, _ := payload.NewMetricWithAlias("temperature", 7, pb.DataType_Double, float64(22.5))
+	b, _ := payload.Encode(payload.NewPayload(0, payload.BdSeqMetric(0), temp))
+	tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NBIRTH, EdgeNodeID: "n1"}.String(), b)
+	pump, _ := payload.NewMetricWithAlias("speed", 8, pb.DataType_Float, float32(1))
+	b, _ = payload.Encode(payload.NewPayload(1, pump))
+	tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.DBIRTH, EdgeNodeID: "n1", DeviceID: "d1"}.String(), b)
+
+	before := app.GetNode("g1", "n1")
+
+	// Data by alias only, without a datatype, as Sparkplug allows after the birth.
+	alias := func(a uint64, v *pb.Payload_Metric) *pb.Payload_Metric {
+		v.Name, v.Alias, v.Datatype = nil, &a, nil
+		return v
+	}
+	nd, _ := payload.NewMetric("x", pb.DataType_Double, float64(23.5))
+	b, _ = payload.Encode(payload.NewPayload(2, alias(7, nd)))
+	tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NDATA, EdgeNodeID: "n1"}.String(), b)
+	dd, _ := payload.NewMetric("x", pb.DataType_Float, float32(2.5))
+	b, _ = payload.Encode(payload.NewPayload(3, alias(8, dd)))
+	tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.DDATA, EdgeNodeID: "n1", DeviceID: "d1"}.String(), b)
+
+	ns := app.GetNode("g1", "n1")
+	m := ns.Metrics["temperature"]
+	if m.GetName() != "temperature" || pb.DataType(m.GetDatatype()) != pb.DataType_Double {
+		t.Fatalf("node metric kept as %v", m)
+	}
+	if v, err := payload.GetValue(m); err != nil || v != float64(23.5) {
+		t.Errorf("temperature = %v, %v; want 23.5", v, err)
+	}
+	dm := ns.Devices["d1"].Metrics["speed"]
+	if v, err := payload.GetValue(dm); err != nil || v != float32(2.5) || dm.GetName() != "speed" {
+		t.Errorf("speed = %v (%v), %v; want 2.5", v, dm, err)
+	}
+	if v, _ := payload.GetValue(before.Metrics["temperature"]); v != float64(22.5) {
+		t.Errorf("an earlier snapshot changed: temperature = %v", v)
+	}
+}
+
+func TestHostRequestsRebirthFromUnknownNode(t *testing.T) {
+	tr := newMockTransport()
+	app, _ := New(tr, testConfig())
+	_ = app.Connect(context.Background())
+
+	m, _ := payload.NewMetric("x", pb.DataType_Int32, int32(1))
+	b, _ := payload.Encode(payload.NewPayload(1, m))
+	dbirth := topic.Topic{GroupID: "g1", Type: topic.DBIRTH, EdgeNodeID: "n1", DeviceID: "d1"}.String()
+	// A DBIRTH before any NBIRTH, twice: one rebirth request.
+	tr.deliverToAll(dbirth, b)
+	tr.deliverToAll(dbirth, b)
+
+	ncmd := topic.ForNCMD("g1", "n1")
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		var reqs int
+		for _, p := range tr.getPublished() {
+			if p.Topic == ncmd {
+				reqs++
+				pl, _ := payload.Decode(p.Payload)
+				if r := pl.Metrics[0]; r.GetName() != "Node Control/Rebirth" || !r.GetBooleanValue() {
+					t.Fatalf("NCMD %v, want Node Control/Rebirth true", r)
+				}
+			}
+		}
+		if reqs == 1 {
+			time.Sleep(50 * time.Millisecond)
+			break
+		}
+		if reqs > 1 || time.Now().After(deadline) {
+			t.Fatalf("%d rebirth requests, want 1", reqs)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if app.GetNode("g1", "n1") != nil {
+		t.Error("a node without NBIRTH must stay unknown")
+	}
+}
+
+func TestHostAppliesReorderedMessagesInSequence(t *testing.T) {
+	tr := newMockTransport()
+	app, _ := New(tr, testConfig())
+	_ = app.Connect(context.Background())
+
+	enc := func(seq uint64, ms ...*pb.Payload_Metric) []byte {
+		b, _ := payload.Encode(payload.NewPayload(seq, ms...))
+		return b
+	}
+	x := func(v int32) *pb.Payload_Metric { m, _ := payload.NewMetric("x", pb.DataType_Int32, v); return m }
+	y := func(v int32) *pb.Payload_Metric { m, _ := payload.NewMetric("y", pb.DataType_Int32, v); return m }
+	tp := func(mt topic.MessageType, dev string) string {
+		return topic.Topic{GroupID: "g1", Type: mt, EdgeNodeID: "n1", DeviceID: dev}.String()
+	}
+
+	// Published as NBIRTH 0, DBIRTH 1, NDATA 2, DDATA 3, NDATA 4; delivered
+	// with the DBIRTH before the NBIRTH and NDATA 4 before NDATA 2.
+	tr.deliverToAll(tp(topic.DBIRTH, "d1"), enc(1, y(10)))
+	tr.deliverToAll(tp(topic.NBIRTH, ""), enc(0, payload.BdSeqMetric(0), x(1)))
+	tr.deliverToAll(tp(topic.NDATA, ""), enc(4, x(3)))
+	tr.deliverToAll(tp(topic.DDATA, "d1"), enc(3, y(11)))
+	tr.deliverToAll(tp(topic.NDATA, ""), enc(2, x(2)))
+
+	ns := app.GetNode("g1", "n1")
+	if ns == nil || ns.Devices["d1"] == nil {
+		t.Fatalf("node or device not tracked: %+v", ns)
+	}
+	if ns.LastSeq != 4 {
+		t.Errorf("LastSeq = %d, want 4: every message applied", ns.LastSeq)
+	}
+	if v, _ := payload.GetValue(ns.Metrics["x"]); v != int32(3) {
+		t.Errorf("x = %v, want 3 (the value of the last NDATA in sequence)", v)
+	}
+	if v, _ := payload.GetValue(ns.Devices["d1"].Metrics["y"]); v != int32(11) {
+		t.Errorf("y = %v, want 11", v)
+	}
+}
+
+func TestHostDropsHeldMessagesThatWaitedTooLong(t *testing.T) {
+	tr := newMockTransport()
+	app, _ := New(tr, testConfig())
+	_ = app.Connect(context.Background())
+
+	enc := func(seq uint64, ms ...*pb.Payload_Metric) []byte {
+		b, _ := payload.Encode(payload.NewPayload(seq, ms...))
+		return b
+	}
+	x := func(v int32) *pb.Payload_Metric { m, _ := payload.NewMetric("x", pb.DataType_Int32, v); return m }
+	ndata := topic.Topic{GroupID: "g1", Type: topic.NDATA, EdgeNodeID: "n1"}.String()
+
+	tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NBIRTH, EdgeNodeID: "n1"}.String(), enc(0, payload.BdSeqMetric(0), x(1)))
+	tr.deliverToAll(ndata, enc(3, x(3))) // ahead: held
+	tr.deliverToAll(ndata, enc(5, x(5))) // ahead: held
+
+	app.mu.Lock()
+	held := app.held[nodeKey("g1", "n1")]
+	if len(held) != 2 {
+		app.mu.Unlock()
+		t.Fatalf("held %d messages, want 2", len(held))
+	}
+	held[1].at = time.Now().Add(-2 * heldMaxAge)
+	app.mu.Unlock()
+
+	tr.deliverToAll(ndata, enc(1, x(10)))
+	tr.deliverToAll(ndata, enc(2, x(2)))
+
+	ns := app.GetNode("g1", "n1")
+	if ns.LastSeq != 3 {
+		t.Errorf("LastSeq = %d, want 3: seq 3 applied, seq 5 dropped", ns.LastSeq)
+	}
+	app.mu.Lock()
+	defer app.mu.Unlock()
+	if n := len(app.held[nodeKey("g1", "n1")]); n != 0 {
+		t.Errorf("%d messages still held, want 0", n)
+	}
+}

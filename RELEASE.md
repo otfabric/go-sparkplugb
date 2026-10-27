@@ -1,0 +1,34 @@
+# go-sparkplugb Releases
+
+## v0.1.0
+
+**Date:** 2026-10-27
+**Previous release:** none
+
+## Summary
+
+The first release: a Sparkplug B 3.0.0 edge node, primary host application
+and application for Go, qualified on every push against six independent
+Sparkplug stacks on four MQTT brokers, through the images of
+[otfabric/sparkplugb-interop v0.1.0](https://github.com/otfabric/sparkplugb-interop/releases/tag/v0.1.0),
+pinned by digest. Running against them found the defects fixed below.
+
+## Changes
+
+### Added
+
+- **Packages** `edge` (edge node with devices, aliases, NCMD/DCMD handling, rebirth, primary host STATE), `host` (primary host application with STATE, `bdSeq` and `seq` tracking, rebirth requests), `app` (application without STATE), `payload` (every scalar, array, DataSet and Template datatype), `topic`, `mqtt` (transport over Eclipse Paho) and `proto` (the Sparkplug B protobuf).
+- **Interop suite** (`make interop`, module `interop/`): the library's host and application against the reference edge nodes of Eclipse Tahu, pysparkplug, SparkplugNet, srad and Eclipse Tahu JavaScript, and the library's edge node against the reference hosts of Eclipse Tahu, pysparkplug, SparkplugNet, srad and sparkplughost, on Mosquitto, HiveMQ CE, EMQX and NanoMQ. See [INTEROPERABILITY.md](INTEROPERABILITY.md).
+
+### Fixed (found by the interop suite)
+
+- **`host` and `app`: `GetNode` and `Nodes` return snapshots.** They returned the live state, which the MQTT goroutine kept changing under the caller.
+- **`host` and `app`: a metric of a data message that carries only an alias keeps the name and datatype of its birth.** Its value was stored without them.
+- **`payload`: integer values are read from whichever of `int_value` and `long_value` carries them.** Eclipse Tahu (Java and JavaScript) encodes UInt32 in `long_value`; the library read 0.
+- **`edge`: NBIRTH carries `Node Control/Rebirth`** (Boolean, false), as the specification requires, unless the caller already has it.
+- **`edge`: a rebirth publishes the current values**, not those of the first birth.
+- **`edge`: a primary host whose STATE is retained is seen.** The node subscribed to STATE before it started waiting for it, and missed a retained online message that arrived in between.
+- **`host`: data from an edge node without a birth is answered with a rebirth request** (at most one per node every 2 seconds), as the specification requires, instead of being dropped.
+- **`host`: messages of a node that arrive out of `seq` order are reordered.** MQTT orders messages only per topic; a broker may deliver a DBIRTH before its NBIRTH (NanoMQ does). Messages ahead of the expected `seq` are held, at most 256 per node and 30 seconds, and applied in order.
+
+---

@@ -75,21 +75,21 @@ func GetValue(m *pb.Payload_Metric) (any, error) {
 	dt := pb.DataType(m.GetDatatype())
 	switch dt {
 	case pb.DataType_Int8:
-		return int8(int32(m.GetIntValue())), nil
+		return int8(int32(integer(m))), nil
 	case pb.DataType_Int16:
-		return int16(int32(m.GetIntValue())), nil
+		return int16(int32(integer(m))), nil
 	case pb.DataType_Int32:
-		return int32(m.GetIntValue()), nil
+		return int32(integer(m)), nil
 	case pb.DataType_Int64:
-		return int64(m.GetLongValue()), nil
+		return int64(integer(m)), nil
 	case pb.DataType_UInt8:
-		return uint8(m.GetIntValue()), nil
+		return uint8(integer(m)), nil
 	case pb.DataType_UInt16:
-		return uint16(m.GetIntValue()), nil
+		return uint16(integer(m)), nil
 	case pb.DataType_UInt32:
-		return m.GetIntValue(), nil
+		return uint32(integer(m)), nil
 	case pb.DataType_UInt64:
-		return m.GetLongValue(), nil
+		return integer(m), nil
 	case pb.DataType_Float:
 		return m.GetFloatValue(), nil
 	case pb.DataType_Double:
@@ -99,7 +99,7 @@ func GetValue(m *pb.Payload_Metric) (any, error) {
 	case pb.DataType_String, pb.DataType_Text, pb.DataType_UUID:
 		return m.GetStringValue(), nil
 	case pb.DataType_DateTime:
-		ms := m.GetLongValue()
+		ms := integer(m)
 		return time.UnixMilli(int64(ms)).UTC(), nil
 	case pb.DataType_Bytes, pb.DataType_File:
 		return m.GetBytesValue(), nil
@@ -142,6 +142,16 @@ func GetValue(m *pb.Payload_Metric) (any, error) {
 	default:
 		return nil, ErrUnknownType
 	}
+}
+
+// integer returns an integer metric value from whichever of int_value and
+// long_value carries it. Sparkplug puts 8- to 32-bit types in int_value, but
+// Eclipse Tahu (Java and JavaScript) encodes UInt32 in long_value.
+func integer(m *pb.Payload_Metric) uint64 {
+	if v, ok := m.GetValue().(*pb.Payload_Metric_LongValue); ok {
+		return v.LongValue
+	}
+	return uint64(m.GetIntValue())
 }
 
 func SetValue(m *pb.Payload_Metric, dt pb.DataType, v any) error {
