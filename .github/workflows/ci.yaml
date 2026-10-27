@@ -1,42 +1,21 @@
 name: CI
+run-name: "CI (${{ github.event_name }}) on ${{ github.ref_name }} by @${{ github.actor }}"
 
 on:
   push:
-    branches: [main]
+    branches: ["**"]
   pull_request:
-    branches: [main]
-  workflow_dispatch:
+    branches: ["**"]
 
 permissions:
   contents: read
+  id-token: write
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-go@v7
-        with:
-          go-version: "1.24"
-
-      - name: Vet
-        run: go vet ./...
-
-      - name: Lint
-        uses: golangci/golangci-lint-action@v7
-
-      - name: Test
-        run: |
-          go test -race -coverprofile=coverage.out \
-            $(go list ./... | grep -v /examples/ | grep -v /proto)
-
-      - name: Coverage gate
-        run: |
-          total=$(go tool cover -func=coverage.out | grep ^total: | awk '{print $3}' | tr -d '%')
-          echo "Total coverage: ${total}%"
-          threshold=90
-          if [ "$(echo "${total} < ${threshold}" | bc -l)" -eq 1 ]; then
-            echo "::error::Coverage ${total}% is below ${threshold}% threshold"
-            exit 1
-          fi
+  ci:
+    uses: otfabric/.github/.github/workflows/go-ci.yml@v2
+    with:
+      codecov-name: go-sparkplugb
+      go-versions: '["1.24", "1.25", "1.26"]'
+      test-exclude-regex: "(/example(s)?($|/)|/proto($|/))"
+    secrets: inherit

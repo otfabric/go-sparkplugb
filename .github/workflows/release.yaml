@@ -1,29 +1,29 @@
 name: Release
 
+run-name: Release (${{ inputs.bump }}) from ${{ github.ref_name }}
+
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      bump:
+        description: Version bump type
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: patch
 
 permissions:
   contents: write
 
 jobs:
   release:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-
-      - uses: actions/setup-go@v7
-        with:
-          go-version: "1.24"
-
-      - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v7
-        with:
-          version: "~> v2"
-          args: release --clean
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    uses: otfabric/.github/.github/workflows/go-package-release.yml@v2
+    with:
+      bump: ${{ inputs.bump }}
+      release-name-prefix: go-sparkplugb
+      test-exclude-regex: "(/example(s)?($|/)|/proto($|/))"
+      update-major-tag: false
+    secrets: inherit
