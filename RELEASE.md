@@ -1,5 +1,25 @@
 # go-sparkplugb Releases
 
+## v0.1.1
+
+**Date:** 2026-10-27
+**Previous release:** v0.1.0
+
+## Summary
+
+The edge node follows its primary host as Sparkplug 3.0.0 requires when the
+host goes offline, also with a single MQTT server. Found by running
+sparkplugbctl's edge simulator against its host simulator.
+
+## Changes
+
+### Fixed
+
+- **`edge`: when the primary host's STATE goes offline the node disconnects and starts over** (tck-id-operational-behavior-edge-node-termination-host-offline and -reconnect): NDEATH, DISCONNECT, then a new session on the next server of `ServerURLs`, or on the same server when there is one, waiting for the host's STATE online before the next birth. With a single server the node stayed connected in state `Disconnected` and never came back.
+- **`edge`: an offline STATE older than the latest online STATE is ignored** (tck-id-operational-behavior-edge-node-termination-host-offline-timestamp): it ends an earlier session of the host.
+
+---
+
 ## v0.1.0
 
 **Date:** 2026-10-27

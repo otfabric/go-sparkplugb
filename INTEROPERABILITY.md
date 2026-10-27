@@ -21,6 +21,7 @@ normative requirements clause by clause.
 | Metric timestamp | on every metric of NBIRTH, DBIRTH, NDATA and DDATA |
 | NBIRTH | `bdSeq`, `Node Control/Rebirth` (Boolean, false), then the node metrics |
 | Aliases | assigned by the caller; data may carry the alias only |
+| Primary host goes offline | NDEATH, DISCONNECT, then a new session on the next server (the same one when there is one), waiting for the host's STATE online; an offline STATE older than the latest online one is ignored |
 
 ## Host and application behaviour
 

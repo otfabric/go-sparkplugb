@@ -114,6 +114,11 @@ type Node struct {
 
 	// Server walking
 	serverIdx int
+	walking   bool
+
+	// hostOnlineTS is the timestamp of the latest online STATE of the
+	// primary host: an offline STATE older than it is ignored.
+	hostOnlineTS int64
 
 	rebirthMu      sync.Mutex
 	rebirthPending bool
@@ -648,13 +653,19 @@ func (n *Node) handleState(topicStr string, data []byte) {
 
 	n.mu.Lock()
 	walk := false
-	if sp.Online && n.state == WaitingForPrimaryHost {
-		n.setState(Online)
-	} else if !sp.Online && n.state == Online && n.cfg.PrimaryHostID != "" {
-		n.born = false
-		n.birthMetrics = nil
-		n.setState(Disconnected)
-		walk = len(n.cfg.ServerURLs) > 1
+	switch {
+	case sp.Online:
+		n.hostOnlineTS = max(n.hostOnlineTS, sp.Timestamp)
+		if n.state == WaitingForPrimaryHost {
+			n.setState(Online)
+		}
+	// The primary host went offline. Sparkplug 3.0: the node disconnects
+	// from this server and starts over on the next one of its list (the same
+	// one when it has only one), unless the offline STATE is older than the
+	// last online one: that is the end of an earlier session of the host.
+	case n.state == Online && sp.Timestamp >= n.hostOnlineTS && !n.walking:
+		n.walking = true
+		walk = true
 	}
 	n.mu.Unlock()
 
@@ -671,11 +682,26 @@ func (n *Node) brokerURL() string {
 }
 
 func (n *Node) walkServers() {
-	_ = n.transport.Disconnect(context.Background())
+	defer func() {
+		n.mu.Lock()
+		n.walking = false
+		n.mu.Unlock()
+	}()
+
+	// An intentional disconnect: NDEATH first, then DISCONNECT.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	_ = n.Disconnect(ctx)
+	cancel()
 
 	for attempt := 0; ; attempt++ {
 		n.mu.Lock()
-		n.serverIdx = (n.serverIdx + 1) % len(n.cfg.ServerURLs)
+		if n.state == Closed {
+			n.mu.Unlock()
+			return
+		}
+		if len(n.cfg.ServerURLs) > 0 {
+			n.serverIdx = (n.serverIdx + 1) % len(n.cfg.ServerURLs)
+		}
 		url := n.brokerURL()
 		n.mu.Unlock()
 
@@ -686,7 +712,7 @@ func (n *Node) walkServers() {
 		err := n.Connect(ctx)
 		cancel()
 		n.cfg.Metrics.OnConnect(url, time.Since(start), err)
-		if err == nil {
+		if err == nil || errors.Is(err, ErrClosed) {
 			return
 		}
 		n.cfg.Logger.Warnf("walk connect failed: %v", err)

@@ -461,8 +461,10 @@ func runEdge(t *testing.T, w *world, a adapter, f *fixture) {
 				t.Fatal(err)
 			}
 			h.stop()
-			eventually(t, "the edge to leave Online when the primary host goes offline", func() bool {
-				return le3.node.State() != edge.Online
+			// Sparkplug 3.0: the node disconnects (NDEATH first), connects
+			// again and waits for the primary host.
+			eventually(t, "the edge to reconnect and wait for the primary host", func() bool {
+				return le3.node.State() == edge.WaitingForPrimaryHost
 			})
 		})
 	}

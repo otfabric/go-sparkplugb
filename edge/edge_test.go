@@ -978,11 +978,13 @@ func TestPrimaryHostGoesOffline(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Host goes offline
+	// Host goes offline: the node publishes NDEATH, disconnects, connects
+	// again (the same server: it has only one) and waits for the host.
 	b, _ = json.Marshal(statePayload{Online: false, Timestamp: 2})
 	tr.deliver(stateTopic, b)
-	if n.State() != Disconnected {
-		t.Errorf("state = %s, want disconnected after host offline", n.State())
+	waitState(t, n, WaitingForPrimaryHost)
+	if !publishedTo(tr, "spBv1.0/testGroup/NDEATH/testNode") {
+		t.Error("no NDEATH before the disconnect")
 	}
 	n.mu.Lock()
 	born := n.born
@@ -990,6 +992,62 @@ func TestPrimaryHostGoesOffline(t *testing.T) {
 	if born {
 		t.Error("born should be false after host goes offline")
 	}
+
+	// The host is back: the node is online again and can be born.
+	b, _ = json.Marshal(statePayload{Online: true, Timestamp: 3})
+	tr.deliver(stateTopic, b)
+	if n.State() != Online {
+		t.Fatalf("state = %s, want online", n.State())
+	}
+	if err := n.PublishBirth(ctx, []*pb.Payload_Metric{m}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestPrimaryHostStaleOffline checks that an offline STATE older than the
+// last online one is ignored: it ends an earlier session of the host.
+func TestPrimaryHostStaleOffline(t *testing.T) {
+	tr := newMockTransport()
+	cfg := testConfig()
+	cfg.PrimaryHostID = "myHost"
+	n, err := New(tr, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := n.Connect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	stateTopic := topic.ForState("myHost")
+	b, _ := json.Marshal(statePayload{Online: true, Timestamp: 5})
+	tr.deliver(stateTopic, b)
+	b, _ = json.Marshal(statePayload{Online: false, Timestamp: 4})
+	tr.deliver(stateTopic, b)
+	time.Sleep(20 * time.Millisecond)
+	if n.State() != Online {
+		t.Errorf("state = %s, want online after a stale offline STATE", n.State())
+	}
+	if publishedTo(tr, "spBv1.0/testGroup/NDEATH/testNode") {
+		t.Error("NDEATH after a stale offline STATE")
+	}
+}
+
+func waitState(t *testing.T, n *Node, want State) {
+	t.Helper()
+	for i := 0; i < 200 && n.State() != want; i++ {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if n.State() != want {
+		t.Fatalf("state = %s, want %s", n.State(), want)
+	}
+}
+
+func publishedTo(tr *mockTransport, topic string) bool {
+	for _, m := range tr.getPublished() {
+		if m.Topic == topic {
+			return true
+		}
+	}
+	return false
 }
 
 func TestHandleMalformedStatePayload(t *testing.T) {
@@ -1272,9 +1330,13 @@ func TestServerWalkingSingleServer(t *testing.T) {
 	b, _ = json.Marshal(statePayload{Online: false, Timestamp: 2})
 	tr.deliver(stateTopic, b)
 
-	// Single server: no walk, just disconnects
-	if n.State() != Disconnected {
-		t.Errorf("state = %s, want disconnected", n.State())
+	// Single server: the walk comes back to it and waits for the host.
+	waitState(t, n, WaitingForPrimaryHost)
+	tr.mu.Lock()
+	url := tr.connectOpts.BrokerURL
+	tr.mu.Unlock()
+	if url != "tcp://broker1:1883" {
+		t.Errorf("after walk, broker = %q, want broker1", url)
 	}
 }
 
