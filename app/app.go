@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	sparkplugb "github.com/otfabric/go-sparkplugb"
 	"github.com/otfabric/go-sparkplugb/mqtt"
 	"github.com/otfabric/go-sparkplugb/payload"
 	pb "github.com/otfabric/go-sparkplugb/proto"
@@ -38,13 +39,6 @@ func (s State) String() string {
 	return "unknown"
 }
 
-type Logger interface {
-	Debugf(format string, args ...any)
-	Infof(format string, args ...any)
-	Warnf(format string, args ...any)
-	Errorf(format string, args ...any)
-}
-
 type StateHandler func(old, new State)
 
 type NodeHandler func(groupID, nodeID string, metrics []*pb.Payload_Metric)
@@ -60,7 +54,8 @@ type Config struct {
 	ClientID   string
 	ServerURLs []string
 
-	Logger        Logger
+	Logger        sparkplugb.Logger
+	Metrics       Metrics
 	OnState       StateHandler
 	OnNodeBirth   NodeHandler
 	OnDeviceBirth DeviceHandler
@@ -110,6 +105,10 @@ func New(transport mqtt.Transport, cfg Config) (*Application, error) {
 	if cfg.ClientID == "" {
 		cfg.ClientID = fmt.Sprintf("sparkplug_app_%d", time.Now().UnixNano()%100000)
 	}
+	if cfg.Metrics == nil {
+		cfg.Metrics = NopMetrics{}
+	}
+	cfg.Logger = sparkplugb.ComponentLogger(cfg.Logger, "app")
 
 	return &Application{
 		cfg:       cfg,
@@ -286,11 +285,12 @@ func (a *Application) ResolveAlias(groupID, nodeID string, alias uint64) (string
 func (a *Application) setState(s State) {
 	old := a.state
 	a.state = s
-	if a.cfg.OnState != nil && old != s {
-		a.cfg.OnState(old, s)
-	}
-	if a.cfg.Logger != nil && old != s {
+	if old != s {
 		a.cfg.Logger.Infof("application state: %s -> %s", old, s)
+		a.cfg.Metrics.OnStateChange(old, s)
+		if a.cfg.OnState != nil {
+			a.cfg.OnState(old, s)
+		}
 	}
 }
 
@@ -349,6 +349,7 @@ func (a *Application) handleNBIRTH(t topic.Topic, data []byte) {
 	a.nodes[key] = ns
 	a.mu.Unlock()
 
+	a.cfg.Metrics.OnNodeBirth(t.GroupID, t.EdgeNodeID)
 	if a.cfg.OnNodeBirth != nil {
 		a.cfg.OnNodeBirth(t.GroupID, t.EdgeNodeID, p.Metrics)
 	}
@@ -384,6 +385,7 @@ func (a *Application) handleNDEATH(t topic.Topic, data []byte) {
 	}
 	a.mu.Unlock()
 
+	a.cfg.Metrics.OnNodeDeath(t.GroupID, t.EdgeNodeID)
 	if a.cfg.OnNodeDeath != nil {
 		a.cfg.OnNodeDeath(t.GroupID, t.EdgeNodeID)
 	}
@@ -549,9 +551,7 @@ func resolveDeviceMetricName(ds *DeviceState, m *pb.Payload_Metric) string {
 }
 
 func (a *Application) logWarn(format string, args ...any) {
-	if a.cfg.Logger != nil {
-		a.cfg.Logger.Warnf(format, args...)
-	}
+	a.cfg.Logger.Warnf(format, args...)
 }
 
 func nodeKey(groupID, nodeID string) string {

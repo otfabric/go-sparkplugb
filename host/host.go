@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	sparkplugb "github.com/otfabric/go-sparkplugb"
 	"github.com/otfabric/go-sparkplugb/mqtt"
 	"github.com/otfabric/go-sparkplugb/payload"
 	pb "github.com/otfabric/go-sparkplugb/proto"
@@ -39,13 +40,6 @@ func (s State) String() string {
 	return "unknown"
 }
 
-type Logger interface {
-	Debugf(format string, args ...any)
-	Infof(format string, args ...any)
-	Warnf(format string, args ...any)
-	Errorf(format string, args ...any)
-}
-
 type StateHandler func(old, new State)
 
 type NodeHandler func(groupID, nodeID string, metrics []*pb.Payload_Metric)
@@ -62,7 +56,8 @@ type Config struct {
 
 	ReorderTimeout time.Duration
 
-	Logger        Logger
+	Logger        sparkplugb.Logger
+	Metrics       Metrics
 	OnState       StateHandler
 	OnNodeBirth   NodeHandler
 	OnDeviceBirth DeviceHandler
@@ -113,6 +108,10 @@ func New(transport mqtt.Transport, cfg Config) (*App, error) {
 	if cfg.ClientID == "" {
 		cfg.ClientID = fmt.Sprintf("sparkplug_host_%s", cfg.HostID)
 	}
+	if cfg.Metrics == nil {
+		cfg.Metrics = NopMetrics{}
+	}
+	cfg.Logger = sparkplugb.ComponentLogger(cfg.Logger, "host")
 
 	return &App{
 		cfg:            cfg,
@@ -317,11 +316,12 @@ func (a *App) ResolveAlias(groupID, nodeID string, alias uint64) (string, bool) 
 func (a *App) setState(s State) {
 	old := a.state
 	a.state = s
-	if a.cfg.OnState != nil && old != s {
-		a.cfg.OnState(old, s)
-	}
-	if a.cfg.Logger != nil && old != s {
+	if old != s {
 		a.cfg.Logger.Infof("host state: %s -> %s", old, s)
+		a.cfg.Metrics.OnStateChange(old, s)
+		if a.cfg.OnState != nil {
+			a.cfg.OnState(old, s)
+		}
 	}
 }
 
@@ -389,6 +389,7 @@ func (a *App) handleNBIRTH(t topic.Topic, data []byte) {
 	}
 	a.mu.Unlock()
 
+	a.cfg.Metrics.OnNodeBirth(t.GroupID, t.EdgeNodeID)
 	if a.cfg.OnNodeBirth != nil {
 		a.cfg.OnNodeBirth(t.GroupID, t.EdgeNodeID, p.Metrics)
 	}
@@ -424,6 +425,7 @@ func (a *App) handleNDEATH(t topic.Topic, data []byte) {
 	}
 	a.mu.Unlock()
 
+	a.cfg.Metrics.OnNodeDeath(t.GroupID, t.EdgeNodeID)
 	if a.cfg.OnNodeDeath != nil {
 		a.cfg.OnNodeDeath(t.GroupID, t.EdgeNodeID)
 	}
@@ -617,9 +619,7 @@ func (a *App) validateSeq(ns *EdgeNodeState, seq uint64, t topic.Topic) bool {
 }
 
 func (a *App) logWarn(format string, args ...any) {
-	if a.cfg.Logger != nil {
-		a.cfg.Logger.Warnf(format, args...)
-	}
+	a.cfg.Logger.Warnf(format, args...)
 }
 
 func nodeKey(groupID, nodeID string) string {

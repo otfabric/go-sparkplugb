@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	sparkplugb "github.com/otfabric/go-sparkplugb"
 	"github.com/otfabric/go-sparkplugb/mqtt"
 	"github.com/otfabric/go-sparkplugb/payload"
 	pb "github.com/otfabric/go-sparkplugb/proto"
@@ -47,13 +48,6 @@ func (s State) String() string {
 	return "unknown"
 }
 
-type Logger interface {
-	Debugf(format string, args ...any)
-	Infof(format string, args ...any)
-	Warnf(format string, args ...any)
-	Errorf(format string, args ...any)
-}
-
 type StateHandler func(old, new State)
 
 type CommandHandler func(deviceID string, metrics []*pb.Payload_Metric)
@@ -67,7 +61,9 @@ type Config struct {
 	PrimaryHostID string
 	ServerURLs    []string
 
-	Logger      Logger
+	Logger      sparkplugb.Logger
+	Metrics     Metrics
+	RetryPolicy sparkplugb.RetryPolicy
 	OnState     StateHandler
 	OnNodeCmd   CommandHandler
 	OnDeviceCmd CommandHandler
@@ -138,6 +134,13 @@ func New(transport mqtt.Transport, cfg Config) (*Node, error) {
 	if cfg.BdSeqStore == nil {
 		cfg.BdSeqStore = &memBdSeqStore{}
 	}
+	if cfg.Metrics == nil {
+		cfg.Metrics = NopMetrics{}
+	}
+	if cfg.RetryPolicy == nil {
+		cfg.RetryPolicy = sparkplugb.ExponentialBackoff{}
+	}
+	cfg.Logger = sparkplugb.ComponentLogger(cfg.Logger, "edge")
 	if cfg.ClientID == "" {
 		cfg.ClientID = fmt.Sprintf("sparkplug_%s_%s", cfg.GroupID, cfg.EdgeNodeID)
 	}
@@ -460,11 +463,12 @@ func (n *Node) ResolveAlias(alias uint64) (string, bool) {
 func (n *Node) setState(s State) {
 	old := n.state
 	n.state = s
-	if n.cfg.OnState != nil && old != s {
-		n.cfg.OnState(old, s)
-	}
-	if n.cfg.Logger != nil && old != s {
+	if old != s {
 		n.cfg.Logger.Infof("state: %s -> %s", old, s)
+		n.cfg.Metrics.OnStateChange(old, s)
+		if n.cfg.OnState != nil {
+			n.cfg.OnState(old, s)
+		}
 	}
 }
 
@@ -519,19 +523,17 @@ func (n *Node) makeStateHandler(connGen uint64) mqtt.MessageHandler {
 func (n *Node) handleMessage(topicStr string, data []byte) {
 	t, err := topic.Parse(topicStr)
 	if err != nil {
-		if n.cfg.Logger != nil {
-			n.cfg.Logger.Warnf("ignoring unparseable topic %q: %v", topicStr, err)
-		}
+		n.cfg.Logger.Warnf("ignoring unparseable topic %q: %v", topicStr, err)
 		return
 	}
 
 	p, err := payload.Decode(data)
 	if err != nil {
-		if n.cfg.Logger != nil {
-			n.cfg.Logger.Warnf("ignoring malformed payload on %q: %v", topicStr, err)
-		}
+		n.cfg.Logger.Warnf("ignoring malformed payload on %q: %v", topicStr, err)
 		return
 	}
+
+	n.cfg.Metrics.OnMessage(t.Type.String())
 
 	switch t.Type {
 	case topic.NCMD:
@@ -546,9 +548,7 @@ func (n *Node) handleMessage(topicStr string, data []byte) {
 func (n *Node) handleNCMD(p *pb.Payload) {
 	for _, m := range p.Metrics {
 		if m.GetName() == "Node Control/Rebirth" && m.GetBooleanValue() {
-			if n.cfg.Logger != nil {
-				n.cfg.Logger.Infof("rebirth requested")
-			}
+			n.cfg.Logger.Infof("rebirth requested")
 			n.rebirthMu.Lock()
 			if !n.rebirthPending {
 				n.rebirthPending = true
@@ -556,9 +556,7 @@ func (n *Node) handleNCMD(p *pb.Payload) {
 					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 					defer cancel()
 					if err := n.Rebirth(ctx); err != nil {
-						if n.cfg.Logger != nil {
-							n.cfg.Logger.Errorf("auto-rebirth failed: %v", err)
-						}
+						n.cfg.Logger.Errorf("auto-rebirth failed: %v", err)
 					}
 					n.rebirthMu.Lock()
 					n.rebirthPending = false
@@ -582,9 +580,7 @@ type statePayload struct {
 func (n *Node) handleState(topicStr string, data []byte) {
 	var sp statePayload
 	if err := json.Unmarshal(data, &sp); err != nil {
-		if n.cfg.Logger != nil {
-			n.cfg.Logger.Warnf("ignoring malformed STATE payload: %v", err)
-		}
+		n.cfg.Logger.Warnf("ignoring malformed STATE payload: %v", err)
 		return
 	}
 
@@ -615,19 +611,34 @@ func (n *Node) brokerURL() string {
 func (n *Node) walkServers() {
 	_ = n.transport.Disconnect(context.Background())
 
-	n.mu.Lock()
-	n.serverIdx = (n.serverIdx + 1) % len(n.cfg.ServerURLs)
-	n.mu.Unlock()
+	for attempt := 0; ; attempt++ {
+		n.mu.Lock()
+		n.serverIdx = (n.serverIdx + 1) % len(n.cfg.ServerURLs)
+		url := n.brokerURL()
+		n.mu.Unlock()
 
-	if n.cfg.Logger != nil {
-		n.cfg.Logger.Infof("walking to server %s", n.brokerURL())
-	}
+		n.cfg.Logger.Infof("walking to server %s (attempt %d)", url, attempt)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if err := n.Connect(ctx); err != nil {
-		if n.cfg.Logger != nil {
-			n.cfg.Logger.Errorf("walk connect failed: %v", err)
+		start := time.Now()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		err := n.Connect(ctx)
+		cancel()
+		n.cfg.Metrics.OnConnect(url, time.Since(start), err)
+		if err == nil {
+			return
+		}
+		n.cfg.Logger.Warnf("walk connect failed: %v", err)
+
+		retry, wait := n.cfg.RetryPolicy.ShouldRetry(attempt, err)
+		if !retry {
+			n.cfg.Logger.Errorf("walk giving up after %d attempts", attempt+1)
+			return
+		}
+		n.cfg.Logger.Infof("retrying in %v", wait)
+		select {
+		case <-time.After(wait):
+		case <-n.closeCh:
+			return
 		}
 	}
 }
