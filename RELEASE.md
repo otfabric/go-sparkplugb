@@ -34,6 +34,10 @@ Broker logins without a custom transport, aliases that are checked to be unique,
 
 - `make e2e`, `make bench`.
 
+### Dependencies
+
+- `golang.org/x/net` → v0.62.0 (govulncheck).
+
 ---
 
 ## v0.1.3
