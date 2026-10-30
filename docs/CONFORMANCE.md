@@ -125,7 +125,7 @@ applicable (broker or server requirement).
 |------------|--------|--------|-------|
 | Metric name in BIRTH only | — | P | Not enforced by library |
 | Metric alias in BIRTH and DATA | — | Y | Edge tracks, Host resolves |
-| Alias unique across entire Edge Node | — | Y | Edge alias map, Host alias map |
+| Alias unique across entire Edge Node | — | Y | Edge returns `ErrDuplicateID` from a birth that breaks it; Host alias map |
 | DataType field set on every metric | — | Y | payload package |
 | Timestamp on every metric | — | Y | NewMetric/StampMetrics sets per-metric ts |
 | is_null for null values | — | Y | payload package |

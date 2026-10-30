@@ -17,11 +17,15 @@ var (
 	ErrUnknownType   = errors.New("sparkplugb: unknown datatype")
 	ErrNilMetric     = errors.New("sparkplugb: nil metric")
 	ErrArrayTooLarge = errors.New("sparkplugb: array exceeds maximum size")
+	// ErrStringTooLarge is returned by GetValue for a string above MaxStringBytes.
+	ErrStringTooLarge = errors.New("sparkplugb: string exceeds maximum size")
 )
 
 const (
+	// MaxArrayElements bounds the elements of a decoded BooleanArray or StringArray.
 	MaxArrayElements = 1 << 20 // 1M elements
-	MaxStringBytes   = 1 << 24 // 16 MiB
+	// MaxStringBytes bounds a string returned by GetValue, scalar or array element.
+	MaxStringBytes = 1 << 24 // 16 MiB
 )
 
 type DataType = pb.DataType
@@ -97,6 +101,9 @@ func GetValue(m *pb.Payload_Metric) (any, error) {
 	case pb.DataType_Boolean:
 		return m.GetBooleanValue(), nil
 	case pb.DataType_String, pb.DataType_Text, pb.DataType_UUID:
+		if len(m.GetStringValue()) > MaxStringBytes {
+			return nil, ErrStringTooLarge
+		}
 		return m.GetStringValue(), nil
 	case pb.DataType_DateTime:
 		ms := integer(m)
@@ -566,15 +573,29 @@ func decodeStringArray(b []byte) ([]string, error) {
 		return []string{}, nil
 	}
 	var out []string
+	add := func(s []byte) error {
+		if len(s) > MaxStringBytes {
+			return ErrStringTooLarge
+		}
+		if len(out) == MaxArrayElements {
+			return ErrArrayTooLarge
+		}
+		out = append(out, string(s))
+		return nil
+	}
 	start := 0
 	for i, c := range b {
 		if c == 0 {
-			out = append(out, string(b[start:i]))
+			if err := add(b[start:i]); err != nil {
+				return nil, err
+			}
 			start = i + 1
 		}
 	}
 	if start < len(b) {
-		out = append(out, string(b[start:]))
+		if err := add(b[start:]); err != nil {
+			return nil, err
+		}
 	}
 	return out, nil
 }

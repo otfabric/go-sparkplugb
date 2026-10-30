@@ -3,12 +3,15 @@
 package payload
 
 import (
+	"errors"
 	"math"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	pb "github.com/otfabric/go-sparkplugb/proto"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestScalarRoundTrip(t *testing.T) {
@@ -368,5 +371,40 @@ func TestIntegerInLongValue(t *testing.T) {
 		if err != nil || got != tc.want {
 			t.Errorf("%v in long_value %d: got %v (%T), %v; want %v", tc.dt, tc.long, got, got, err, tc.want)
 		}
+	}
+}
+
+// Regression: MaxStringBytes was exported and enforced nowhere, and a
+// StringArray of NUL bytes grew 16 bytes of string header per byte received.
+func TestDecodeLimits(t *testing.T) {
+	long := strings.Repeat("x", MaxStringBytes+1)
+	limit := strings.Repeat("x", MaxStringBytes)
+	strMetric := func(dt pb.DataType, s string) *pb.Payload_Metric {
+		return &pb.Payload_Metric{Datatype: proto.Uint32(uint32(dt)), Value: &pb.Payload_Metric_StringValue{StringValue: s}}
+	}
+	arrMetric := func(b []byte) *pb.Payload_Metric {
+		return &pb.Payload_Metric{Datatype: proto.Uint32(uint32(pb.DataType_StringArray)), Value: &pb.Payload_Metric_BytesValue{BytesValue: b}}
+	}
+	tests := []struct {
+		name string
+		m    *pb.Payload_Metric
+		want error
+	}{
+		{"string at the limit", strMetric(pb.DataType_String, limit), nil},
+		{"string", strMetric(pb.DataType_String, long), ErrStringTooLarge},
+		{"text", strMetric(pb.DataType_Text, long), ErrStringTooLarge},
+		{"uuid", strMetric(pb.DataType_UUID, long), ErrStringTooLarge},
+		{"array element at the limit", arrMetric([]byte(limit + "\x00")), nil},
+		{"array element", arrMetric([]byte(long + "\x00")), ErrStringTooLarge},
+		{"last array element, unterminated", arrMetric([]byte("a\x00" + long)), ErrStringTooLarge},
+		{"array at the element limit", arrMetric(make([]byte, MaxArrayElements)), nil},
+		{"array elements", arrMetric(make([]byte, MaxArrayElements+1)), ErrArrayTooLarge},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := GetValue(tt.m); !errors.Is(err, tt.want) {
+				t.Fatalf("err %v, want %v", err, tt.want)
+			}
+		})
 	}
 }
