@@ -12,6 +12,8 @@ make check           # format, lint, vet, vulnerability scan, tests with -race, 
 make test            # the library tests with the race detector
 make stress          # the tests shuffled, twice, with the race detector
 make fuzz            # every fuzz target (FUZZTIME=30s each by default)
+make e2e             # the runtimes over Paho against a fake broker
+make bench           # benchmarks
 make generate-check  # fail if regenerating proto/ changes the committed code
 make interop         # against the sparkplugb-interop images (the interop/ module; needs Docker)
 make help            # every target

@@ -19,7 +19,7 @@ jobs:
       go-versions: '["1.26", "1.27"]'
       test-exclude-regex: "(/example(s)?($|/)|/proto($|/))"
       run-govulncheck: true
-      # Measured 91.0 % with the coverpkg below (go-ci method); COVER_MIN in
+      # Measured 94.5 % with the coverpkg below (go-ci method); COVER_MIN in
       # the Makefile is 90.
       coverage-min: "90"
       fuzz-time: 10s

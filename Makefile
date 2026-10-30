@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help all build fmt fmt-check lint lint-ci vet vuln test stress coverage cover coverage-gate fuzz generate generate-check cross check clean test-interop interop
+.PHONY: help all build fmt fmt-check lint lint-ci vet vuln test stress coverage cover coverage-gate fuzz bench e2e generate generate-check cross check clean test-interop interop
 
 help: ## This help
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z0-9_-]+:.*?## / {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -93,6 +93,12 @@ fuzz: ## Run the fuzz targets for FUZZTIME each (default 30s)
 		echo "$$pkg $$name"; \
 		go test -run '^$$' -fuzz "^$$name$$" -fuzztime $(FUZZTIME) "$$pkg" || exit 1; \
 	done
+
+bench: ## Run the benchmarks
+	@go test -run '^$$' -bench . -benchmem $(TEST_PKGS)
+
+e2e: ## The runtimes over Paho against a fake broker on loopback TCP
+	@go test -count=1 -race -run '^TestE2E' ./mqtt
 
 generate: ## Regenerate Protobuf code
 	@echo "Generating Protobuf code"

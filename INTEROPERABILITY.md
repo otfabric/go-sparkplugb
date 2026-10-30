@@ -9,7 +9,7 @@ normative requirements clause by clause.
 
 | Item | go-sparkplugb |
 |------|---------------|
-| MQTT | 3.1.1 (Eclipse Paho): TCP, TLS (`TLSConfig`) or WebSocket, by the scheme of the broker URL |
+| MQTT | 3.1.1, falling back to 3.1 if the broker refuses it (Eclipse Paho); no MQTT 5: TCP, TLS (`TLSConfig`) or WebSocket, by the scheme of the broker URL |
 | Namespace | `spBv1.0` |
 | STATE | Sparkplug 3.0 (`spBv1.0/STATE/<host id>`, JSON `{"online", "timestamp"}`, QoS 1, retained) |
 | Int8, Int16 encoded as | `int_value` sign-extended to 32 bits (as Eclipse Tahu and SparkplugNet) |

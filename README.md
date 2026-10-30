@@ -13,8 +13,9 @@ go-sparkplugb handles the full Sparkplug B 3.0.0 protocol lifecycle for Edge
 Nodes, Host Applications and Applications: topic namespace, Protobuf codecs,
 typed metrics (including arrays, templates and datasets), sequence numbering,
 alias management, birth/death certificates, primary host awareness with server
-walking, and message reordering. It ships an MQTT 3.1.1 transport over Eclipse
-Paho; any other MQTT client plugs in through the `mqtt.Transport` interface.
+walking, and message reordering. It ships an MQTT transport over Eclipse Paho, which
+asks for MQTT 3.1.1 and falls back to 3.1 if the broker refuses it, and has no
+MQTT 5. Any other MQTT client plugs in through the `mqtt.Transport` interface.
 
 **Quick links:**
 [Install](#installation) ·
@@ -43,7 +44,7 @@ Paho; any other MQTT client plugs in through the `mqtt.Transport` interface.
 | **Topic namespace** | Parser and builder for `spBv1.0/{group}/{type}/{node}/[{device}]` with validation |
 | **Observability** | Pluggable `Logger` (`log/slog`, standard `log`) and `Metrics` callbacks per role; `context.Context` on every blocking call |
 | **Protobuf types** | Generated from the canonical Eclipse Tahu `sparkplug_b.proto` (pinned commit, SHA-256 verified) |
-| **MQTT transport** | `mqtt.Transport` interface; Eclipse Paho adapter (MQTT 3.1.1 over TCP, TLS or WebSocket) included |
+| **MQTT transport** | `mqtt.Transport` interface; Eclipse Paho adapter included (MQTT 3.1.1, with fallback to 3.1, over TCP, TLS or WebSocket; no MQTT 5) |
 
 ## go-sparkplugb vs other Sparkplug B stacks
 
@@ -59,7 +60,7 @@ table compares them, to help you pick the right one for your project.
 | Primary host application (STATE) | ✅ | ✅ | — ¹ | ✅ | ✅ | ✅ |
 | Application without STATE | ✅ | ✅ | ✅ plain client | ✅ | — | — |
 | STATE of Sparkplug 3.0 / 2.2 | 3.0 | 3.0 | 3.0 | 3.0 and 2.2 | 3.0 | 3.0 |
-| MQTT | 3.1.1 (Paho), any client through `mqtt.Transport` | 3.1.1 (Paho) | 3.1.1 and 5 (paho-mqtt) | 3.1.1 and 5 (MQTTnet) | 5 (rumqttc) | 3.1.1 (Paho) |
+| MQTT | 3.1.1 with fallback to 3.1 (Paho), any client through `mqtt.Transport` | 3.1.1 (Paho) | 3.1.1 and 5 (paho-mqtt) | 3.1.1 and 5 (MQTTnet) | 5 (rumqttc) | 3.1.1 (Paho) |
 | TLS, WebSocket | ✅ ✅ | by URL scheme, no TLS settings | ✅ ✅ | ✅ ✅ | not documented | ✅ TLS |
 | Edge: devices | ✅ | ✅ | ✅ | ✅ | ✅ | — |
 | Edge: metric aliases | ✅ caller-assigned | ✅ generated | ✅ caller-assigned | ✅ caller-assigned | ✅ | — |
@@ -318,6 +319,7 @@ MQTT_BROKER=tcp://localhost:1883 go run ./examples/edge-node
 | `EdgeNodeID` | `string` | required | Edge node identifier |
 | `BrokerURL` | `string` | | MQTT broker URL (`tcp://`, `ssl://`) |
 | `ServerURLs` | `[]string` | | Multiple broker URLs for server walking |
+| `Username`, `Password` | `string` | | Broker login, for every server. A `Password` needs a `Username`. Never logged; use `ssl://` |
 | `ClientID` | `string` | `sparkplug_<group>_<node>` | MQTT client ID |
 | `PrimaryHostID` | `string` | | Primary Host Application ID: births wait for its STATE online; its STATE offline makes the node disconnect and walk to the next server |
 | `BdSeqStore` | `BdSeqStore` | in memory | Where `bdSeq` is kept across restarts |
@@ -338,6 +340,7 @@ carry the alias only, and `ResolveAlias` maps it back.
 | `HostID` | `string` | required | Host Application identifier |
 | `BrokerURL` | `string` | | MQTT broker URL |
 | `ServerURLs` | `[]string` | | Multiple broker URLs |
+| `Username`, `Password` | `string` | | Broker login, for every server. A `Password` needs a `Username`. Never logged; use `ssl://` |
 | `ClientID` | `string` | `sparkplug_host_<host id>` | MQTT client ID |
 | `ReorderTimeout` | `time.Duration` | `0` | How long a `seq` gap may stay open before a rebirth request; `0` requests it at once |
 | `Logger` | `sparkplugb.Logger` | none | Logger |
@@ -356,6 +359,7 @@ carry the alias only, and `ResolveAlias` maps it back.
 |-------|------|---------|-------------|
 | `BrokerURL` | `string` | | MQTT broker URL |
 | `ServerURLs` | `[]string` | | Multiple broker URLs (fallback) |
+| `Username`, `Password` | `string` | | Broker login, for every server. A `Password` needs a `Username`. Never logged; use `ssl://` |
 | `ClientID` | `string` | `sparkplug_app_<n>` | MQTT client ID |
 | `Logger` | `sparkplugb.Logger` | none | Logger |
 | `Metrics` | `app.Metrics` | none | Connect, message, state-change, node birth and death callbacks |
@@ -430,7 +434,10 @@ go-sparkplugb
 |--------|-------------|
 | `make test` | Run all tests |
 | `make cover` | Run tests with coverage report |
-| `make lint` | Run golangci-lint |
+| `make lint` | Run staticcheck |
+| `make lint-ci` | Run golangci-lint |
+| `make e2e` | The runtimes over Paho against a fake broker on loopback TCP |
+| `make bench` | Benchmarks |
 | `make build` | Build examples |
 | `make check` | Lint + test + coverage gate (90%) |
 | `make interop` | Edge, host and application against the six reference stacks of sparkplugb-interop, on Mosquitto, HiveMQ CE, EMQX and NanoMQ (`interop/` module, Docker) |
@@ -440,6 +447,10 @@ git clone https://github.com/otfabric/go-sparkplugb.git
 cd go-sparkplugb
 make check
 ```
+
+## Further Reading
+
+[API.md](API.md), [ARCHITECTURE.md](ARCHITECTURE.md), [OBSERVABILITY.md](OBSERVABILITY.md), [TESTING.md](TESTING.md), [INTEROPERABILITY.md](INTEROPERABILITY.md), [ERRORS.md](ERRORS.md), [LIMITATIONS.md](LIMITATIONS.md), [docs/FEATURE-STATUS.md](docs/FEATURE-STATUS.md), [docs/CONFORMANCE.md](docs/CONFORMANCE.md).
 
 ## Related Projects
 

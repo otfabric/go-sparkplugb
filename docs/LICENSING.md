@@ -92,8 +92,10 @@ requires:
 | Module | License | Purpose |
 |--------|---------|---------|
 | `google.golang.org/protobuf` | BSD-3-Clause | Protobuf runtime |
-| `github.com/eclipse/paho.mqtt.golang` | EPL-2.0 / EDL-1.0 | MQTT 3.1.1 client |
-| `github.com/eclipse-paho/paho.golang` | EPL-2.0 / EDL-1.0 | MQTT 5.0 client |
+| `github.com/eclipse/paho.mqtt.golang` | EPL-2.0 / EDL-1.0 | MQTT 3.1.1 client (falls back to 3.1) |
+| `github.com/gorilla/websocket` | BSD-2-Clause | Indirect: WebSocket transport of Paho |
+| `golang.org/x/net` | BSD-3-Clause | Indirect: of Paho |
+| `golang.org/x/sync` | BSD-3-Clause | Indirect: of Paho |
 
 The Eclipse Distribution License 1.0 (EDL-1.0) is equivalent to the
 BSD-3-Clause license.
