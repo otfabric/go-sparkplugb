@@ -13,9 +13,40 @@ permissions:
 
 jobs:
   ci:
-    uses: otfabric/.github/.github/workflows/go-ci.yml@v2
+    uses: otfabric/.github/.github/workflows/go-ci.yml@v2.1.0
     with:
       codecov-name: go-sparkplugb
       go-versions: '["1.26", "1.27"]'
       test-exclude-regex: "(/example(s)?($|/)|/proto($|/))"
+      run-govulncheck: true
+      # Measured 91.0 % with the coverpkg below (go-ci method); COVER_MIN in
+      # the Makefile is 90.
+      coverage-min: "90"
+      fuzz-time: 10s
+      # Match the Makefile's COVER_PKGS.
+      coverpkg: github.com/otfabric/go-sparkplugb,github.com/otfabric/go-sparkplugb/app,github.com/otfabric/go-sparkplugb/edge,github.com/otfabric/go-sparkplugb/host,github.com/otfabric/go-sparkplugb/mqtt,github.com/otfabric/go-sparkplugb/payload,github.com/otfabric/go-sparkplugb/topic
     secrets: inherit
+
+  # The committed Protobuf code must match the pinned .proto, with the protoc
+  # and protoc-gen-go of the header of proto/sparkplug_b.pb.go.
+  generated:
+    name: Generated code
+    runs-on: ubuntu-latest
+    env:
+      PROTOC_VERSION: "36.2"
+      PROTOC_SHA256: 121f6c7afe1d4d0e3ea6aab9432038599250134cbf4474cb1167d2c7decd4278
+      PROTOC_GEN_GO_VERSION: v1.36.6
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Install protoc and protoc-gen-go
+        run: |
+          curl -fsSLo "$RUNNER_TEMP/protoc.zip" \
+            "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip"
+          echo "${PROTOC_SHA256}  $RUNNER_TEMP/protoc.zip" | sha256sum -c -
+          unzip -q "$RUNNER_TEMP/protoc.zip" -d "$RUNNER_TEMP/protoc"
+          echo "$RUNNER_TEMP/protoc/bin" >> "$GITHUB_PATH"
+          go install "google.golang.org/protobuf/cmd/protoc-gen-go@${PROTOC_GEN_GO_VERSION}"
+      - run: make generate-check
