@@ -22,7 +22,13 @@ var (
 	ErrClosed       = errors.New("sparkplugb: closed")
 	ErrNotConnected = errors.New("sparkplugb: not connected")
 	ErrNoBirth      = errors.New("sparkplugb: birth not published")
-	ErrDuplicateID  = errors.New("sparkplugb: duplicate device or alias ID")
+	// ErrDuplicateID is returned by PublishBirth and PublishDeviceBirth when an
+	// alias is used twice in one birth or by another part of the edge node.
+	ErrDuplicateID = errors.New("sparkplugb: duplicate device or alias ID")
+	// ErrInvalidState is not returned by this package.
+	//
+	// Deprecated: operations in the wrong state return ErrNotConnected, ErrNoBirth
+	// or ErrClosed. It stays for source compatibility.
 	ErrInvalidState = errors.New("sparkplugb: invalid state transition")
 )
 
@@ -61,6 +67,12 @@ type Config struct {
 
 	PrimaryHostID string
 	ServerURLs    []string
+
+	// Username and Password log in to every broker of the node. A Password
+	// needs a Username. They are passed to the transport and never logged; use
+	// TLS, since MQTT carries them in clear.
+	Username string
+	Password string
 
 	Logger      sparkplugb.Logger
 	Metrics     Metrics
@@ -104,7 +116,8 @@ type Node struct {
 	bdSeq   uint64
 	seq     uint64
 	devices map[string]*Device
-	aliases map[uint64]string // alias -> metric name for uniqueness
+	aliases map[uint64]string // alias -> metric name
+	owners  map[uint64]string // alias -> device ID, "" for the node
 	born    bool
 	gen     uint64 // connection generation; prevents stale callbacks
 	closeCh chan struct{}
@@ -137,6 +150,9 @@ func New(transport mqtt.Transport, cfg Config) (*Node, error) {
 	if cfg.BrokerURL == "" && len(cfg.ServerURLs) == 0 {
 		return nil, errors.New("sparkplugb: BrokerURL or ServerURLs required")
 	}
+	if cfg.Password != "" && cfg.Username == "" {
+		return nil, errors.New("sparkplugb: Password requires Username")
+	}
 	if cfg.BdSeqStore == nil {
 		cfg.BdSeqStore = &memBdSeqStore{}
 	}
@@ -156,6 +172,7 @@ func New(transport mqtt.Transport, cfg Config) (*Node, error) {
 		transport: transport,
 		devices:   make(map[string]*Device),
 		aliases:   make(map[uint64]string),
+		owners:    make(map[uint64]string),
 		closeCh:   make(chan struct{}),
 	}, nil
 }
@@ -210,6 +227,8 @@ func (n *Node) Connect(ctx context.Context) error {
 		WillPayload:  willBytes,
 		WillQoS:      1,
 		WillRetained: false,
+		Username:     n.cfg.Username,
+		Password:     n.cfg.Password,
 
 		OnConnectionLost: n.makeConnLostHandler(connGen),
 	})
@@ -264,9 +283,15 @@ func (n *Node) PublishBirth(ctx context.Context, nodeMetrics []*pb.Payload_Metri
 		n.mu.Unlock()
 		return ErrNotConnected
 	}
+	// An NBIRTH starts a new session, so only its own metrics can collide.
+	if err := aliasConflict(nil, "", nodeMetrics); err != nil {
+		n.mu.Unlock()
+		return err
+	}
 	n.seq = 0
 	n.born = true
 	n.aliases = make(map[uint64]string)
+	n.owners = make(map[uint64]string)
 
 	// Store birth metrics for auto-rebirth
 	n.birthMetrics = make([]*pb.Payload_Metric, len(nodeMetrics))
@@ -276,6 +301,7 @@ func (n *Node) PublishBirth(ctx context.Context, nodeMetrics []*pb.Payload_Metri
 	for _, m := range nodeMetrics {
 		if m.Alias != nil {
 			n.aliases[m.GetAlias()] = m.GetName()
+			n.owners[m.GetAlias()] = ""
 		}
 	}
 
@@ -304,6 +330,10 @@ func (n *Node) PublishDeviceBirth(ctx context.Context, deviceID string, metrics 
 		n.mu.Unlock()
 		return ErrNoBirth
 	}
+	if err := aliasConflict(n.owners, deviceID, metrics); err != nil {
+		n.mu.Unlock()
+		return err
+	}
 
 	if _, exists := n.devices[deviceID]; !exists {
 		n.devices[deviceID] = &Device{ID: deviceID}
@@ -316,6 +346,7 @@ func (n *Node) PublishDeviceBirth(ctx context.Context, deviceID string, metrics 
 	for _, m := range metrics {
 		if m.Alias != nil {
 			n.aliases[m.GetAlias()] = m.GetName()
+			n.owners[m.GetAlias()] = deviceID
 		}
 	}
 
@@ -326,6 +357,28 @@ func (n *Node) PublishDeviceBirth(ctx context.Context, deviceID string, metrics 
 	payload.StampMetrics(metrics)
 	p := payload.NewPayload(seq, metrics...)
 	return n.publish(ctx, topic.DBIRTH, deviceID, p)
+}
+
+// aliasConflict returns ErrDuplicateID when metrics use an alias twice, or one
+// that owners gives to another part of the edge node: Sparkplug requires an
+// alias to be unique across the edge node. A device repeating its own birth
+// keeps its aliases.
+func aliasConflict(owners map[uint64]string, owner string, metrics []*pb.Payload_Metric) error {
+	seen := make(map[uint64]struct{}, len(metrics))
+	for _, m := range metrics {
+		if m.Alias == nil {
+			continue
+		}
+		alias := m.GetAlias()
+		if _, dup := seen[alias]; dup {
+			return fmt.Errorf("sparkplugb: alias %d used twice in a birth: %w", alias, ErrDuplicateID)
+		}
+		seen[alias] = struct{}{}
+		if prev, taken := owners[alias]; taken && prev != owner {
+			return fmt.Errorf("sparkplugb: alias %d of device %q is already in use: %w", alias, owner, ErrDuplicateID)
+		}
+	}
+	return nil
 }
 
 func (n *Node) PublishNodeData(ctx context.Context, metrics []*pb.Payload_Metric) error {

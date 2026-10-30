@@ -1498,3 +1498,63 @@ func TestPrimaryHostStateDuringSubscribe(t *testing.T) {
 		t.Fatalf("state %s: the retained STATE online arrived during Subscribe and must count", n.State())
 	}
 }
+
+func TestConnectPassesCredentials(t *testing.T) {
+	tr := newMockTransport()
+	n, err := New(tr, Config{GroupID: "g", EdgeNodeID: "n", BrokerURL: "tcp://b:1883", Username: "u", Password: "p"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := n.Connect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if tr.connectOpts.Username != "u" || tr.connectOpts.Password != "p" {
+		t.Errorf("credentials %q, %q", tr.connectOpts.Username, tr.connectOpts.Password)
+	}
+}
+
+// Regression: a second metric with the same alias overwrote the first without
+// a word, though Sparkplug requires aliases unique across the edge node.
+func TestAliasUniqueness(t *testing.T) {
+	ctx := context.Background()
+	tr := newMockTransport()
+	n, err := New(tr, Config{GroupID: "g", EdgeNodeID: "n", BrokerURL: "tcp://b:1883"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := n.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	metric := func(name string, alias uint64) *pb.Payload_Metric {
+		return &pb.Payload_Metric{Name: strPtr(name), Alias: &alias, Datatype: dtPtr(pb.DataType_Double)}
+	}
+
+	if err := n.PublishBirth(ctx, []*pb.Payload_Metric{metric("a", 1), metric("b", 1)}); !errors.Is(err, ErrDuplicateID) {
+		t.Fatalf("twice in NBIRTH: %v", err)
+	}
+	if n.born {
+		t.Fatal("a refused NBIRTH left the node born")
+	}
+	if err := n.PublishBirth(ctx, []*pb.Payload_Metric{metric("a", 1)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.PublishDeviceBirth(ctx, "d1", []*pb.Payload_Metric{metric("x", 2), metric("y", 2)}); !errors.Is(err, ErrDuplicateID) {
+		t.Fatalf("twice in DBIRTH: %v", err)
+	}
+	if err := n.PublishDeviceBirth(ctx, "d1", []*pb.Payload_Metric{metric("x", 1)}); !errors.Is(err, ErrDuplicateID) {
+		t.Fatalf("alias of the node: %v", err)
+	}
+	if err := n.PublishDeviceBirth(ctx, "d1", []*pb.Payload_Metric{metric("x", 2)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.PublishDeviceBirth(ctx, "d2", []*pb.Payload_Metric{metric("x", 2)}); !errors.Is(err, ErrDuplicateID) {
+		t.Fatalf("alias of another device: %v", err)
+	}
+	// A device repeats its birth, and a rebirth reuses every alias.
+	if err := n.PublishDeviceBirth(ctx, "d1", []*pb.Payload_Metric{metric("x", 2)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.Rebirth(ctx); err != nil {
+		t.Fatal(err)
+	}
+}

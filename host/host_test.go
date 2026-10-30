@@ -1456,3 +1456,17 @@ func TestHostDropsHeldMessagesThatWaitedTooLong(t *testing.T) {
 		t.Errorf("%d messages still held, want 0", n)
 	}
 }
+
+func TestConnectPassesCredentials(t *testing.T) {
+	tr := newMockTransport()
+	c, err := New(tr, Config{HostID: "h", BrokerURL: "tcp://b:1883", Username: "u", Password: "p"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Connect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if tr.opts.Username != "u" || tr.opts.Password != "p" {
+		t.Errorf("credentials %q, %q", tr.opts.Username, tr.opts.Password)
+	}
+}
