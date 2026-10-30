@@ -12,8 +12,8 @@ distinct values.
 | `ErrClosed` | `Connect` is called on a closed node |
 | `ErrNotConnected` | `PublishBirth` or `Rebirth` is called when the node is not online |
 | `ErrNoBirth` | Node data or a device birth, data or death comes before the node's birth |
-| `ErrDuplicateID` | Exported, not returned by this version |
-| `ErrInvalidState` | Exported, not returned by this version |
+| `ErrDuplicateID` | `PublishBirth` or `PublishDeviceBirth` uses an alias twice, or one of another part of the edge node |
+| `ErrInvalidState` | Deprecated. Not returned: an operation in the wrong state returns `ErrNotConnected`, `ErrNoBirth` or `ErrClosed` |
 
 ## host
 
@@ -43,7 +43,8 @@ distinct values.
 | `ErrTypeMismatch` | The value does not have the metric's datatype |
 | `ErrUnknownType` | The datatype is not one the codec knows |
 | `ErrInvalidArray` | Array bytes are not a valid encoding of the datatype |
-| `ErrArrayTooLarge` | A BooleanArray declares more than `MaxArrayElements` elements |
+| `ErrArrayTooLarge` | A BooleanArray or StringArray has more than `MaxArrayElements` elements |
+| `ErrStringTooLarge` | `GetValue` meets a string or StringArray element above `MaxStringBytes` |
 | `ErrColumnMismatch` | A DataSet's columns, types or rows disagree in count |
 
 ## topic

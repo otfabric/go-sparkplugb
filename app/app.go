@@ -55,6 +55,12 @@ type Config struct {
 	ClientID   string
 	ServerURLs []string
 
+	// Username and Password log in to every broker. A Password needs a
+	// Username. They are passed to the transport and never logged; use TLS,
+	// since MQTT carries them in clear.
+	Username string
+	Password string
+
 	Logger        sparkplugb.Logger
 	Metrics       Metrics
 	OnState       StateHandler
@@ -107,6 +113,9 @@ func New(transport mqtt.Transport, cfg Config) (*Application, error) {
 	if cfg.BrokerURL == "" && len(cfg.ServerURLs) == 0 {
 		return nil, errors.New("sparkplugb: BrokerURL or ServerURLs required")
 	}
+	if cfg.Password != "" && cfg.Username == "" {
+		return nil, errors.New("sparkplugb: Password requires Username")
+	}
 	if cfg.ClientID == "" {
 		cfg.ClientID = fmt.Sprintf("sparkplug_app_%d", time.Now().UnixNano()%100000)
 	}
@@ -141,6 +150,8 @@ func (a *Application) Connect(ctx context.Context) error {
 		BrokerURL:    brokerURL,
 		ClientID:     a.cfg.ClientID,
 		CleanSession: true,
+		Username:     a.cfg.Username,
+		Password:     a.cfg.Password,
 
 		OnConnectionLost: a.onConnectionLost,
 	})

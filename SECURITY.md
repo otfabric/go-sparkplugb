@@ -32,14 +32,17 @@ targets (`make fuzz`).
 - `mqtt.PahoTransport.TLSConfig` is passed to Paho as given. The library never
   sets `InsecureSkipVerify`.
 - The runtimes log nothing unless a `Logger` is set.
-- `edge`, `host` and `app` do not set `ConnectOpts.Username` or
-  `ConnectOpts.Password`: see [LIMITATIONS.md](LIMITATIONS.md).
+- `Config.Username` and `Config.Password` of `edge`, `host` and `app` reach the
+  transport only. They are never logged, and a `Config` printed by the application
+  shows them, so do not print it. MQTT carries them in clear: use `ssl://`. Do not
+  put them in a broker URL, which does get logged.
 
 ## Resource limits
 
 | Limit | Default | Option |
 |---|---|---|
-| Elements of a BooleanArray | `payload.MaxArrayElements` (1 << 20) | none |
+| Elements of a BooleanArray or StringArray (`payload.GetValue`) | `payload.MaxArrayElements` (1 << 20) | none |
+| Bytes of a string or StringArray element (`payload.GetValue`) | `payload.MaxStringBytes` (1 << 24) | none |
 | Messages held per edge node for reordering (`host`, `app`) | 256, at most 30 seconds | none |
 | Pending rebirth requests per node (`host`, `app`) | one, for the next NBIRTH or 2 seconds | none |
 | Connect timeout (`PahoTransport`) | 10 s | `ConnectTimeout` |
@@ -48,6 +51,5 @@ targets (`make fuzz`).
 ## Known security limitations
 
 - No library limit on the size of a received payload: `payload.Decode` takes what
-  the broker delivers, so bound the message size at the broker. `payload.MaxStringBytes`
-  is exported but not enforced.
-- `edge`, `host` and `app` keep no broker credentials of their own.
+  the broker delivers, so bound the message size at the broker. The limits above apply
+  afterwards, in `payload.GetValue`, and not to DataSet cells or template parameters.

@@ -137,3 +137,21 @@ func TestStampMetricsEmpty(t *testing.T) {
 	StampMetrics(nil)
 	StampMetrics([]*pb.Payload_Metric{})
 }
+
+func BenchmarkEncodeDecode(b *testing.B) {
+	m, err := NewMetric("temperature", pb.DataType_Double, float64(21.5))
+	if err != nil {
+		b.Fatal(err)
+	}
+	p := NewPayload(1, m)
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		raw, err := Encode(p)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if _, err := Decode(raw); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

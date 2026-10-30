@@ -1,5 +1,41 @@
 # go-sparkplugb Releases
 
+## v0.2.0
+
+**Date:** 2026-10-30
+**Previous release:** v0.1.3
+
+## Summary
+
+Broker logins without a custom transport, aliases that are checked to be unique, and string limits that are enforced.
+
+## Changes
+
+### Added
+
+- **`Username` and `Password` in `Config` of `edge`, `host` and `app`**, passed to `ConnectOpts`, so a broker that requires a login no longer needs a custom `mqtt.Transport`. They are never logged. `New` refuses a `Password` without a `Username`.
+- **`payload.ErrStringTooLarge`.**
+
+### Fixed
+
+- **`edge`: an alias that is not unique across the edge node is refused** with `ErrDuplicateID` by `PublishBirth` and `PublishDeviceBirth`; a later metric used to overwrite the earlier one without a word. A device repeating its birth keeps its aliases.
+- **`payload.GetValue` enforces its limits:** a string or StringArray element above `MaxStringBytes` returns `ErrStringTooLarge`, and a StringArray above `MaxArrayElements` returns `ErrArrayTooLarge`. `MaxStringBytes` was exported and unused.
+
+### Deprecated
+
+- **`edge.ErrInvalidState`:** never returned. It stays for source compatibility.
+
+### Documentation
+
+- **MQTT versions:** the Paho adapter asks for 3.1.1 and falls back to 3.1, with no MQTT 5. `docs/LICENSING.md` no longer lists `paho.golang`, which is not a dependency, and lists the indirect ones.
+- **New:** API.md, ARCHITECTURE.md, OBSERVABILITY.md, TESTING.md, docs/FEATURE-STATUS.md.
+
+### Build
+
+- `make e2e`, `make bench`.
+
+---
+
 ## v0.1.3
 
 **Date:** 2026-10-27
