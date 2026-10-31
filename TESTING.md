@@ -20,7 +20,15 @@
 
 ## Coverage
 
-`proto/` (generated) and `examples/` are excluded; the `coverpkg` of `.github/workflows/ci.yaml` matches `COVER_PKGS` of the Makefile. `make coverage` shows the current figure.
+`proto/` (generated) and `examples/` are excluded; the `coverpkg` of `.github/workflows/ci.yaml` matches `COVER_PKGS` of the Makefile. `make coverage` shows the current figure. `make coverage-pkg-check` requires `COVER_PKG_MIN` (80) of each package of `COVER_PKGS`; `mqtt` is the lowest, at 85 %.
+
+## Prerequisites
+
+The interop suite (build tag `interop`) skips without Docker, or fails with `SPARKPLUGB_REQUIRE_INTEROP=1`, which `make interop` sets.
+
+## Leaks
+
+`edge`, `host` and `app` start goroutines: their tests end with `goleak.VerifyTestMain` (test-only dependency).
 
 ## Fuzz regressions
 

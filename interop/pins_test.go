@@ -1,3 +1,5 @@
+//go:build interop
+
 // SPDX-License-Identifier: MIT
 
 package interop
@@ -15,7 +17,7 @@ import (
 func TestWorkflowPins(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", ".github", "workflows", "interop.yml"))
 	if err != nil {
-		t.Skipf("interop workflow not found: %v", err)
+		prerequisite(t, "interop workflow not found: %v", err)
 	}
 	wf := string(data)
 

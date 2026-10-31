@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help all build fmt fmt-check lint lint-ci vet vuln test stress coverage cover coverage-gate fuzz bench e2e generate generate-check cross check clean test-interop interop
+.PHONY: help all build fmt fmt-check lint lint-ci vet vuln test stress coverage coverage-pkg-check cover coverage-gate fuzz bench e2e generate generate-check cross check clean test-interop interop
 
 help: ## This help
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z0-9_-]+:.*?## / {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -15,6 +15,8 @@ BIN_DIR := bin
 TEST_PKGS := $(shell go list ./... | grep -vE '/examples|/proto$$')
 COVER_PKGS := $(shell go list ./... | grep -vE '/examples|/proto$$' | paste -sd, -)
 COVER_MIN ?= 90
+# Per-package floor (TEST-012), over the packages of COVER_PKGS.
+COVER_PKG_MIN := 80
 
 all: build ## Default target: build the examples
 
@@ -71,6 +73,12 @@ coverage: ## Run tests with coverage (writes coverage.out)
 	@go test -count=1 -race -coverprofile=coverage.out -covermode=atomic -coverpkg=$(COVER_PKGS) $(TEST_PKGS)
 	@go tool cover -func=coverage.out | tail -n1
 
+coverage-pkg-check: coverage ## Fail when a package of COVER_PKGS is below COVER_PKG_MIN (reads coverage.out)
+	@awk -v m="$(COVER_PKG_MIN)" -v pkgs="$(COVER_PKGS)" 'BEGIN { split(pkgs, l, ","); for (i in l) want[l[i]] = 1 } \
+	NR > 1 { n[$$1] = $$2; if ($$3 > 0) h[$$1] = 1 } \
+	END { for (k in n) { p = k; sub(/\/[^\/]*$$/, "", p); if (p in want) { s[p] += n[k]; if (k in h) c[p] += n[k] } } \
+	for (p in s) { v = 100 * c[p] / s[p]; if (v < m) { printf "%s: %.1f%% < %s%%\n", p, v, m; bad = 1 } } exit bad }' coverage.out
+
 coverage-gate: coverage ## Fail if coverage is below COVER_MIN percent
 	@total=$$(go tool cover -func=coverage.out | awk '/^total:/ {sub("%", "", $$3); print $$3}'); \
 	if awk -v t="$$total" -v m="$(COVER_MIN)" 'BEGIN { exit !(t + 0 >= m + 0) }'; then \
@@ -109,7 +117,8 @@ generate-check: generate ## Fail if regenerating changes the committed code
 
 test-interop: ## Run the edge/host/app against the sparkplugb-interop references and brokers pinned in interop/images.go (needs Docker; INTEROP_TESTFLAGS=-v)
 	@echo "Running interop tests"
-	@cd interop && go vet ./... && golangci-lint run ./... && go test -race -count=1 -timeout=30m $(INTEROP_TESTFLAGS) ./...
+	@cd interop && go vet -tags interop ./... && golangci-lint run --build-tags interop ./... && \
+		SPARKPLUGB_REQUIRE_INTEROP=1 go test -tags interop -race -count=1 -timeout=30m $(INTEROP_TESTFLAGS) ./...
 
 interop: test-interop ## Alias for test-interop
 
@@ -120,7 +129,7 @@ cross: ## Cross-compile for common platforms
 	GOOS=darwin  GOARCH=arm64 go build ./...
 	GOOS=windows GOARCH=amd64 go build ./...
 
-check: fmt fmt-check lint lint-ci vet vuln test coverage-gate ## Run format + lint + vet + vuln + test + coverage gate
+check: fmt fmt-check lint lint-ci vet vuln test coverage-gate coverage-pkg-check ## Run format + lint + vet + vuln + test + coverage gate
 
 clean: ## Remove generated binaries and coverage artifacts
 	@echo "Cleaning up"
