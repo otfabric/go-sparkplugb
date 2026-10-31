@@ -40,7 +40,7 @@ distinct values.
 | Error | Returned when |
 |---|---|
 | `ErrNilMetric` | The metric is nil |
-| `ErrTypeMismatch` | The value does not have the metric's datatype |
+| `ErrTypeMismatch` | The value does not have the metric's datatype: on `SetValue` its Go type, on `GetValue` an Int8 or Int16 wire value that is neither width-sized nor sign-extended |
 | `ErrUnknownType` | The datatype is not one the codec knows |
 | `ErrInvalidArray` | Array bytes are not a valid encoding of the datatype |
 | `ErrArrayTooLarge` | A BooleanArray or StringArray has more than `MaxArrayElements` elements |

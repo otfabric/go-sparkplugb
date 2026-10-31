@@ -233,7 +233,7 @@ var knownBugs = []knownBugEntry{
 	{"pysparkplug", "0.6.1", "edge", "", "", []string{"graceful-death"},
 		"EdgeNode advances bdSeq after NBIRTH: the NDEATH of disconnect() carries bdSeq+1"},
 	{"pysparkplug", "0.6.1", "host", "", "scalars", []string{"births"},
-		"decodes Int8 and Int16 only as width-sized two's complement: a negative value sign-extended to 32 bits, as Tahu and go-sparkplugb encode it, raises OverflowError and the whole NBIRTH is dropped"},
+		"specification ambiguity: decodes Int8 and Int16 only as width-sized two's complement: a negative value sign-extended to 32 bits, as Tahu and go-sparkplugb encode it, raises OverflowError and the whole NBIRTH is dropped"},
 	{"pysparkplug", "0.6.1", "host", "nanomq|hivemq-ce", "", []string{"*"}, reorderBug},
 	{"srad", "0.5.0", "host", "nanomq|hivemq-ce", "", []string{"*"}, reorderBug},
 	{"sparkplughost", "v0.4.0", "host", "nanomq|hivemq-ce", "", []string{"*"}, reorderBug},

@@ -92,7 +92,7 @@ cover: coverage ## Open coverage report in browser
 	@go tool cover -html=coverage.out
 
 FUZZTIME ?= 30s
-FUZZ_TARGETS := ./payload:FuzzDecode ./payload:FuzzDecodeBooleanArray ./payload:FuzzDecodeStringArray ./topic:FuzzParse
+FUZZ_TARGETS := ./payload:FuzzDecode ./payload:FuzzDecodeSignedInt ./payload:FuzzDecodeBooleanArray ./payload:FuzzDecodeStringArray ./topic:FuzzParse
 
 fuzz: ## Run the fuzz targets for FUZZTIME each (default 30s)
 	@echo "Fuzzing (FUZZTIME=$(FUZZTIME))"

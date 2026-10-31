@@ -199,6 +199,98 @@ func TestSignedIntExtension(t *testing.T) {
 	}
 }
 
+func TestSignedIntEncoding(t *testing.T) {
+	for _, tc := range []struct {
+		dt   pb.DataType
+		v    any
+		want uint32
+	}{
+		{pb.DataType_Int8, int8(-8), 0xFFFFFFF8},
+		{pb.DataType_Int8, int8(-128), 0xFFFFFF80},
+		{pb.DataType_Int8, int8(127), 0x7F},
+		{pb.DataType_Int8, int8(0), 0},
+		{pb.DataType_Int16, int16(-8), 0xFFFFFFF8},
+		{pb.DataType_Int16, int16(-32768), 0xFFFF8000},
+		{pb.DataType_Int16, int16(32767), 0x7FFF},
+		{pb.DataType_Int16, int16(0), 0},
+	} {
+		m := &pb.Payload_Metric{}
+		if err := SetValue(m, tc.dt, tc.v); err != nil {
+			t.Fatalf("%v %v: %v", tc.dt, tc.v, err)
+		}
+		if got := m.GetIntValue(); got != tc.want {
+			t.Errorf("%v %v on the wire = %#x, want %#x", tc.dt, tc.v, got, tc.want)
+		}
+	}
+}
+
+func TestSignedIntDecoding(t *testing.T) {
+	for _, tc := range []struct {
+		dt   pb.DataType
+		wire uint32
+		want any
+	}{
+		// Sign-extended.
+		{pb.DataType_Int8, 0xFFFFFFF8, int8(-8)},
+		{pb.DataType_Int8, 0xFFFFFFFF, int8(-1)},
+		{pb.DataType_Int8, 0xFFFFFF80, int8(-128)},
+		{pb.DataType_Int16, 0xFFFFFFF8, int16(-8)},
+		{pb.DataType_Int16, 0xFFFFFFFF, int16(-1)},
+		{pb.DataType_Int16, 0xFFFF8000, int16(-32768)},
+		// Width-sized.
+		{pb.DataType_Int8, 0xF8, int8(-8)},
+		{pb.DataType_Int8, 0xFF, int8(-1)}, // 255 is the width form of -1
+		{pb.DataType_Int8, 0x80, int8(-128)},
+		{pb.DataType_Int16, 0xFFF8, int16(-8)},
+		{pb.DataType_Int16, 0xFFFF, int16(-1)},
+		{pb.DataType_Int16, 0x8000, int16(-32768)},
+		// The forms coincide.
+		{pb.DataType_Int8, 0, int8(0)},
+		{pb.DataType_Int8, 127, int8(127)},
+		{pb.DataType_Int16, 0, int16(0)},
+		{pb.DataType_Int16, 127, int16(127)},
+		{pb.DataType_Int16, 128, int16(128)}, // not the sign bit of an Int16
+		{pb.DataType_Int16, 32767, int16(32767)},
+	} {
+		dt := uint32(tc.dt)
+		m := &pb.Payload_Metric{Datatype: &dt, Value: &pb.Payload_Metric_IntValue{IntValue: tc.wire}}
+		got, err := GetValue(m)
+		if err != nil || got != tc.want {
+			t.Errorf("%v from %#x: got %v (%T), %v; want %v", tc.dt, tc.wire, got, got, err, tc.want)
+		}
+	}
+}
+
+func TestSignedIntOutOfRange(t *testing.T) {
+	for _, tc := range []struct {
+		dt   pb.DataType
+		wire uint32
+	}{
+		{pb.DataType_Int8, 0x00000100}, // one above the width
+		{pb.DataType_Int8, 0x0000FFF8}, // the width form of an Int16
+		{pb.DataType_Int8, 0xFFFFFF7F}, // sign bit of the width clear
+		{pb.DataType_Int8, 0x7FFFFFFF},
+		{pb.DataType_Int8, 0x80000000},
+		{pb.DataType_Int16, 0x00010000},
+		{pb.DataType_Int16, 0xFFFF7FFF},
+		{pb.DataType_Int16, 0x7FFFFFFF},
+		{pb.DataType_Int16, 0x80000000},
+	} {
+		dt := uint32(tc.dt)
+		m := &pb.Payload_Metric{Datatype: &dt, Value: &pb.Payload_Metric_IntValue{IntValue: tc.wire}}
+		got, err := GetValue(m)
+		if !errors.Is(err, ErrTypeMismatch) || got != nil {
+			t.Errorf("%v from %#x: got %v, %v; want ErrTypeMismatch", tc.dt, tc.wire, got, err)
+		}
+	}
+	// long_value holds the same rule, beyond 32 bits too.
+	dt := uint32(pb.DataType_Int8)
+	m := &pb.Payload_Metric{Datatype: &dt, Value: &pb.Payload_Metric_LongValue{LongValue: 0x1FFFFFFF8}}
+	if _, err := GetValue(m); !errors.Is(err, ErrTypeMismatch) {
+		t.Errorf("Int8 from long_value 0x1FFFFFFF8: %v, want ErrTypeMismatch", err)
+	}
+}
+
 func TestNilMetricGetValue(t *testing.T) {
 	_, err := GetValue(nil)
 	if err != ErrNilMetric {
