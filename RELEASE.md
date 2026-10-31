@@ -1,5 +1,16 @@
 # go-sparkplugb Releases
 
+## v0.2.1
+
+**Date:** 2026-10-31
+**Previous release:** v0.2.0
+
+### Changed
+
+- Policy 1.2: build output in `bin/` and `release/`, a per-package coverage floor, and more tests and CI. No change in behaviour.
+
+---
+
 ## v0.2.0
 
 **Date:** 2026-10-30
