@@ -1,2 +1,16 @@
 coverage.out
 *.test
+
+# Build artefacts live in /bin/ and /release/ (otfabric/engineering REPO-005)
+/bin/
+/release/
+
+# Output of a bare `go build`, anchored so it can never hide a source folder
+/examples/aliases/aliases
+/examples/application/application
+/examples/commands/commands
+/examples/datasets/datasets
+/examples/edge-node/edge-node
+/examples/host-app/host-app
+/examples/server-walking/server-walking
+/examples/templates/templates
