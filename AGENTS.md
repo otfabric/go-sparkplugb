@@ -6,7 +6,7 @@ Eclipse Sparkplug B 3.0.0 library for Go: Edge Node, Host Application and Applic
 
 ## Organisation standards
 
-This repository follows **otfabric/engineering policy 1.1**, profile **protocol-library** (`.otfabric/policy.yaml`, mode `enforce`). Where this file and the organisation standards disagree, this file wins here: say so in your report.
+This repository follows **otfabric/engineering policy 1.2**, profile **protocol-library** (`.otfabric/policy.yaml`, mode `enforce`). Where this file and the organisation standards disagree, this file wins here: say so in your report.
 
 ## Where the truth lives
 
