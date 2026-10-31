@@ -1,3 +1,5 @@
+//go:build interop
+
 // SPDX-License-Identifier: MIT
 
 package interop
@@ -37,6 +39,7 @@ type adapter struct {
 // restricts the run to a comma-separated subset.
 func adapters(t testing.TB) []adapter {
 	t.Helper()
+	requireDocker(t)
 	all := []adapter{
 		{"tahu", envImage("tahu", TahuImage)},
 		{"pysparkplug", envImage("pysparkplug", PysparkplugImage)},
@@ -263,6 +266,24 @@ func brokers(t testing.TB) []broker {
 }
 
 // ── Docker ───────────────────────────────────────────────────────────────────
+
+// prerequisite skips a test whose prerequisite is missing, or fails it when
+// SPARKPLUGB_REQUIRE_INTEROP is set: `make interop` sets it, so the Interop
+// workflow cannot pass by skipping everything.
+func prerequisite(t testing.TB, format string, args ...any) {
+	t.Helper()
+	if os.Getenv("SPARKPLUGB_REQUIRE_INTEROP") != "" {
+		t.Fatalf(format, args...)
+	}
+	t.Skipf(format+" (SPARKPLUGB_REQUIRE_INTEROP=1 makes this a failure)", args...)
+}
+
+func requireDocker(t testing.TB) {
+	t.Helper()
+	if _, _, err := docker("info", "--format", "{{.ServerVersion}}"); err != nil {
+		prerequisite(t, "the interop suite needs Docker: %v", err)
+	}
+}
 
 func docker(args ...string) (stdout, stderr string, err error) {
 	var out, errb bytes.Buffer
