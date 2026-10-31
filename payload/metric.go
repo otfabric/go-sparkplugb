@@ -79,9 +79,17 @@ func GetValue(m *pb.Payload_Metric) (any, error) {
 	dt := pb.DataType(m.GetDatatype())
 	switch dt {
 	case pb.DataType_Int8:
-		return int8(int32(integer(m))), nil
+		v, err := signedInt(integer(m), 8)
+		if err != nil {
+			return nil, err
+		}
+		return int8(v), nil
 	case pb.DataType_Int16:
-		return int16(int32(integer(m))), nil
+		v, err := signedInt(integer(m), 16)
+		if err != nil {
+			return nil, err
+		}
+		return int16(v), nil
 	case pb.DataType_Int32:
 		return int32(integer(m)), nil
 	case pb.DataType_Int64:
@@ -159,6 +167,23 @@ func integer(m *pb.Payload_Metric) uint64 {
 		return v.LongValue
 	}
 	return uint64(m.GetIntValue())
+}
+
+// signedInt decodes an Int8 or Int16 of the given width from its wire value.
+// Sparkplug carries both in an unsigned field and does not say how a negative
+// value goes in: Eclipse Tahu sign-extends it (int8(-8) is 0xFFFFFFF8),
+// pysparkplug and srad send the width (0xF8). Both are accepted; SetValue
+// sign-extends. A value that is neither is not an integer of that width, and
+// returns ErrTypeMismatch rather than being truncated. See INTEROPERABILITY.md.
+func signedInt(v uint64, bits uint) (int64, error) {
+	shift := 64 - bits
+	s := int64(v<<shift) >> shift
+	// The width-sized form, the 32-bit sign extension of int_value, and the
+	// 64-bit one, which long_value can carry.
+	if v < 1<<bits || v == uint64(uint32(s)) || v == uint64(s) {
+		return s, nil
+	}
+	return 0, ErrTypeMismatch
 }
 
 func SetValue(m *pb.Payload_Metric, dt pb.DataType, v any) error {

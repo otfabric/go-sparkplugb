@@ -136,8 +136,8 @@ applicable (broker or server requirement).
 
 | Requirement | TCK ID | Status | Notes |
 |------------|--------|--------|-------|
-| Int8 in uint32 field, sign-extend correctly | — | Y | payload package |
-| Int16 in uint32 field, sign-extend correctly | — | Y | payload package |
+| Int8 in uint32 field | — | Y | The specification does not say how a negative value goes in: encoded sign-extended, decoded from either form ([INTEROPERABILITY.md](../INTEROPERABILITY.md#negative-int8-and-int16)) |
+| Int16 in uint32 field | — | Y | As Int8 |
 | Int32 in uint32 field, interpret as signed | — | Y | payload package |
 | Int64 in uint64 field, interpret as signed | — | Y | payload package |
 

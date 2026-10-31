@@ -13,7 +13,7 @@ normative requirements clause by clause.
 | Namespace | `spBv1.0` |
 | STATE | Sparkplug 3.0 (`spBv1.0/STATE/<host id>`, JSON `{"online", "timestamp"}`, QoS 1, retained) |
 | Int8, Int16 encoded as | `int_value` sign-extended to 32 bits (as Eclipse Tahu and SparkplugNet) |
-| Int8, Int16 decoded from | either form: sign-extended or width-sized (as pysparkplug and srad send it) |
+| Int8, Int16 decoded from | either form: sign-extended or width-sized (as pysparkplug and srad send it). Anything else, such as `0x100` or `0xFFFFFF7F` for an Int8, is `ErrTypeMismatch` |
 | UInt32 encoded as | `int_value` (protobuf `uint32`, as the specification says) |
 | Integers decoded from | `int_value` or `long_value`, whichever carries the value (Eclipse Tahu puts UInt32 in `long_value`) |
 | Datatype in NDATA, DDATA, NCMD, DCMD | as the caller builds the metric (`payload.NewMetric` sets it); a received metric without one takes the datatype of its birth |
@@ -22,6 +22,26 @@ normative requirements clause by clause.
 | NBIRTH | `bdSeq`, `Node Control/Rebirth` (Boolean, false), then the node metrics |
 | Aliases | assigned by the caller; data may carry the alias only |
 | Primary host goes offline | NDEATH, DISCONNECT, then a new session on the next server (the same one when there is one), waiting for the host's STATE online; an offline STATE older than the latest online one is ignored |
+
+### Negative Int8 and Int16
+
+Specification ambiguity. Sparkplug B 3.0.0 gives Int8 and Int16 the protobuf
+type `uint32` and does not say how a negative value goes in. Eclipse Tahu,
+SparkplugNet and the Sparkplug TCK's encoder sign-extend it to 32 bits;
+pysparkplug and srad send the width. Each form keeps the two's-complement
+bits of the value, and for a value that is not negative the two coincide.
+
+go-sparkplugb follows Eclipse Tahu on encoding and accepts both on decoding:
+
+| Value | Encoded | Decoded from |
+|-------|---------|--------------|
+| `int8(-8)` | `0xFFFFFFF8` | `0xFFFFFFF8`, `0x000000F8` |
+| `int16(-8)` | `0xFFFFFFF8` | `0xFFFFFFF8`, `0x0000FFF8` |
+
+`payload.GetValue` returns `ErrTypeMismatch` for any other value; it does not
+truncate. This covers metrics. DataSet values and template parameters of
+these types are passed through as the raw `uint32` (`GetDataSetValues` and
+`GetTemplateParameterValue`), so which form they have is the caller's.
 
 ## Host and application behaviour
 
@@ -59,7 +79,8 @@ on Eclipse Mosquitto 2.1.2, HiveMQ CE 2026.5, EMQX 6.3.2 and NanoMQ 0.25.7.
 node does not go offline on it; the will after a crash is checked instead.
 ² pysparkplug's host cannot decode a negative Int8 or Int16 sign-extended to
 32 bits, as go-sparkplugb (and Tahu) encode it: the scalars fixture is
-skipped.
+skipped. This is a [specification ambiguity](#negative-int8-and-int16), not
+a defect of either side.
 ³ without device writes: SparkplugNet's edge drops a DCMD for a device.
 ⁴ without the steps after a death: SparkplugNet's host keeps dead nodes and
 devices online.
@@ -67,8 +88,8 @@ devices online.
 and the brokers reorder messages across topics in some runs.
 
 A reference that lacks a capability (a datatype, a call, a feature) skips
-the steps that need it; each skip and known upstream bug is logged with its
-reason. The upstream bugs are described in
+the steps that need it; each skip and known difference is logged with its
+reason. The differences are described in
 [sparkplugb-interop's COMPATIBILITY.md](https://github.com/otfabric/sparkplugb-interop/blob/main/docs/COMPATIBILITY.md).
 
 The suite (`make interop`, module `interop/`):

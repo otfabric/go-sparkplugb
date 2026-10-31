@@ -126,7 +126,8 @@ The specification is authoritative.
 | 22-34 | Array types | `bytes_value` (packed little-endian) |
 
 **Critical**: Int8, Int16, Int32 are signed integers transported in a `uint32`
-protobuf field. The library must handle sign extension correctly. BooleanArray
+protobuf field, and the specification does not say how a negative Int8 or Int16
+goes in (INTEROPERABILITY.md). BooleanArray
 is bit-packed with a 4-byte count prefix. StringArray uses null-terminated
 strings.
 

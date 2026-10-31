@@ -32,3 +32,9 @@ evidence in [INTEROPERABILITY.md](INTEROPERABILITY.md).
 
 Interpretations where the specification leaves room, and how they differ between
 stacks, are in [INTEROPERABILITY.md](INTEROPERABILITY.md#on-the-wire).
+
+- Negative Int8 and Int16: go-sparkplugb sign-extends on encoding, which the
+  pysparkplug host cannot decode, and accepts both forms on decoding
+  ([specification ambiguity](INTEROPERABILITY.md#negative-int8-and-int16)).
+- DataSet values and template parameters of type Int8 and Int16 are raw
+  `uint32` values in the API: neither form is applied or checked.

@@ -130,7 +130,8 @@ reference lacks or that hit one of its upstream bugs:
 ¹ pysparkplug's NDEATH carries the next `bdSeq`: the will after a crash is
 checked instead.
 ² pysparkplug's host cannot decode a negative Int8 or Int16 sign-extended to
-32 bits: the scalars fixture is skipped.
+32 bits, a [specification ambiguity](INTEROPERABILITY.md#negative-int8-and-int16):
+the scalars fixture is skipped.
 ³ without device writes: SparkplugNet's edge drops a DCMD for a device.
 ⁴ without the steps after a death: SparkplugNet's host keeps dead nodes
 online.

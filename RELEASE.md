@@ -1,5 +1,24 @@
 # go-sparkplugb Releases
 
+## v0.2.3
+
+**Date:** 2026-10-31
+**Previous release:** v0.2.2
+
+### Changed
+
+- **`payload.GetValue` rejects an Int8 or Int16 that is not a valid wire value, a behaviour change.** It used to truncate every value to the width, so `0x100` read as Int8 0 and `0xFFFFFF7F` as 127. It now accepts the width-sized form and the sign-extended one, which the specification leaves open, and returns `ErrTypeMismatch` for anything else. Valid values decode as before. Negative Int8 and Int16 are still encoded sign-extended to 32 bits, as Eclipse Tahu does: nothing changes on the wire.
+
+### Documentation
+
+- The Int8 and Int16 encoding is recorded as a specification ambiguity, not a defect of any stack (`INTEROPERABILITY.md`, `LIMITATIONS.md`, `docs/CONFORMANCE.md`).
+
+### Tests
+
+- `FuzzDecodeSignedInt`. The interop suite checks which form each reference edge node has on the wire.
+
+---
+
 ## v0.2.2
 
 **Date:** 2026-10-31

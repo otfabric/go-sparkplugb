@@ -258,6 +258,31 @@ func newValue(datatype string, v any) any {
 	return f + 1
 }
 
+// widthSizedEdges are the references that encode a negative Int8 or Int16 in
+// its width; the others sign-extend it to 32 bits. Sparkplug leaves it open,
+// and the library decodes both.
+var widthSizedEdges = map[string]bool{"pysparkplug": true, "srad": true}
+
+// checkIntForm checks that the Int8 and Int16 of a birth came in the form the
+// reference is known for, so that the suite does exercise both.
+func checkIntForm(t *testing.T, a adapter, f *fixture, got map[string]*pb.Payload_Metric) {
+	t.Helper()
+	for _, m := range f.Node.Metrics {
+		bits := map[string]uint{"Int8": 8, "Int16": 16}[m.Datatype]
+		v, ok := m.Value.(float64)
+		if bits == 0 || !ok || got[m.Name] == nil {
+			continue
+		}
+		want := uint32(int32(v))
+		if widthSizedEdges[a.name] {
+			want &= 1<<bits - 1
+		}
+		if raw := got[m.Name].GetIntValue(); raw != want {
+			t.Errorf("%s of %s on the wire is %#x, want %#x", m.Name, a.name, raw, want)
+		}
+	}
+}
+
 func runHost(t *testing.T, w *world, a adapter, fxName string) {
 	f := a.fixture(t, fxName)
 	edgeNode := "e-" + a.name
@@ -283,6 +308,7 @@ func runHost(t *testing.T, w *world, a adapter, fxName string) {
 	run("births", func(t *testing.T) {
 		expectState(t, h, f, edgeNode, offline, "births")
 		ns := h.GetNode(f.Group, edgeNode)
+		checkIntForm(t, a, f, ns.Metrics)
 		if ready.BdSeq != nil && ns.BdSeq != uint64(*ready.BdSeq) {
 			t.Errorf("bdSeq %d, the edge says %d", ns.BdSeq, *ready.BdSeq)
 		}
