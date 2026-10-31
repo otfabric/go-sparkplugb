@@ -1,5 +1,16 @@
 # go-sparkplugb Releases
 
+## v0.2.2
+
+**Date:** 2026-10-31
+**Previous release:** v0.2.1
+
+### Fixed
+
+- `PahoTransport` Publish and Subscribe now honour ctx, fail at once when the connection ends, and stay within `PublishTimeout`. paho could block for 30s in the call on a connection that had just dropped, and ctx was ignored.
+
+---
+
 ## v0.2.1
 
 **Date:** 2026-10-31
