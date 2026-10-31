@@ -17,6 +17,7 @@ type PahoTransport struct {
 	client paho.Client
 	opts   *paho.ClientOptions
 	onLost func(error)
+	closed chan struct{} // closed when the current connection ends
 
 	TLSConfig      *tls.Config
 	ConnectTimeout time.Duration
@@ -53,6 +54,12 @@ func (t *PahoTransport) Connect(ctx context.Context, opts ConnectOpts) error {
 		pahoOpts.SetConnectTimeout(t.ConnectTimeout)
 	}
 
+	// Without this paho waits 30s to hand a packet to a connection that has
+	// just dropped, before any token exists to wait on.
+	if t.PublishTimeout > 0 {
+		pahoOpts.SetWriteTimeout(t.PublishTimeout)
+	}
+
 	if opts.WillTopic != "" {
 		pahoOpts.SetBinaryWill(opts.WillTopic, opts.WillPayload, opts.WillQoS, opts.WillRetained)
 	}
@@ -66,6 +73,7 @@ func (t *PahoTransport) Connect(ctx context.Context, opts ConnectOpts) error {
 	t.opts = pahoOpts
 	t.client = paho.NewClient(pahoOpts)
 	t.onLost = nil
+	t.closed = make(chan struct{})
 
 	token := t.client.Connect()
 	if !token.WaitTimeout(t.ConnectTimeout) {
@@ -90,28 +98,27 @@ func (t *PahoTransport) release(c paho.Client) func(error) {
 	lost := t.onLost
 	t.client = nil
 	t.onLost = nil
+	close(t.closed)
 	return lost
 }
 
 func (t *PahoTransport) Publish(ctx context.Context, topic string, qos byte, retained bool, payload []byte) error {
 	t.mu.Lock()
-	client := t.client
+	client, closed := t.client, t.closed
 	t.mu.Unlock()
 
 	if client == nil || !client.IsConnected() {
 		return fmt.Errorf("sparkplugb: not connected")
 	}
 
-	token := client.Publish(topic, qos, retained, payload)
-	if !token.WaitTimeout(t.PublishTimeout) {
-		return fmt.Errorf("sparkplugb: publish timeout")
-	}
-	return token.Error()
+	return t.await(ctx, closed, "publish", func() paho.Token {
+		return client.Publish(topic, qos, retained, payload)
+	})
 }
 
 func (t *PahoTransport) Subscribe(ctx context.Context, topic string, qos byte, handler MessageHandler) error {
 	t.mu.Lock()
-	client := t.client
+	client, closed := t.client, t.closed
 	t.mu.Unlock()
 
 	if client == nil || !client.IsConnected() {
@@ -122,11 +129,38 @@ func (t *PahoTransport) Subscribe(ctx context.Context, topic string, qos byte, h
 		handler(msg.Topic(), msg.Payload())
 	}
 
-	token := client.Subscribe(topic, qos, callback)
-	if !token.WaitTimeout(t.PublishTimeout) {
-		return fmt.Errorf("sparkplugb: subscribe timeout")
+	return t.await(ctx, closed, "subscribe", func() paho.Token {
+		return client.Subscribe(topic, qos, callback)
+	})
+}
+
+// await runs a paho operation and returns when it completes, ctx ends, the
+// connection ends or PublishTimeout passes. op runs in its own goroutine
+// because paho can block in the call itself, before it returns a token.
+func (t *PahoTransport) await(ctx context.Context, closed <-chan struct{}, what string, op func() paho.Token) error {
+	done := make(chan error, 1)
+	timeout := fmt.Errorf("sparkplugb: %s timeout", what)
+	go func() {
+		token := op()
+		if !token.WaitTimeout(t.PublishTimeout) {
+			done <- timeout
+			return
+		}
+		done <- token.Error()
+	}()
+
+	timer := time.NewTimer(t.PublishTimeout)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return fmt.Errorf("sparkplugb: %s: %w", what, ctx.Err())
+	case <-closed:
+		return fmt.Errorf("sparkplugb: %s: %w", what, ErrConnectionLost)
+	case <-timer.C:
+		return timeout
 	}
-	return token.Error()
 }
 
 func (t *PahoTransport) Disconnect(ctx context.Context) error {
