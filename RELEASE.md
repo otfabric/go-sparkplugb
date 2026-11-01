@@ -1,5 +1,24 @@
 # go-sparkplugb Releases
 
+## v0.3.2
+
+**Date:** 2026-11-01
+**Previous release:** v0.3.1
+
+### Fixed
+
+- **An NBIRTH delivered just after the NDEATH of the same `bdSeq` no longer brings a dead edge node back online.** MQTT orders messages per topic only, so a will can overtake a rebirth that was in flight when the edge node died; `host` and `app` then showed the node online for good. For 2 seconds after an NDEATH, an NBIRTH with its `bdSeq` is dropped, and a rebirth is then requested. A node whose NDEATH had a `bdSeq` ahead of the known session goes offline on that NBIRTH. A DBIRTH on an offline node no longer puts the device online.
+
+### Changed
+
+- An edge node that restarts with the `bdSeq` of its NDEATH within 2 seconds, as srad does when it starts again at 0, comes online on the rebirth that follows, up to about 2 seconds later than before.
+
+### Tests
+
+- `host` and `app`: late NBIRTHs after an NDEATH, a will before its NBIRTH, a restart with the same `bdSeq`, and the limits of the 2 seconds.
+
+---
+
 ## v0.3.1
 
 **Date:** 2026-11-01

@@ -81,6 +81,7 @@ or `uint64`: it is checked by the table above and written in the form above.
 | Message out of sequence, older than the node's current NBIRTH | Dropped, up to 30 seconds after that NBIRTH, and held messages older than an NBIRTH are dropped when it arrives: they are of a session that has ended. Reading: Sparkplug has the payload timestamp be the time of publishing, and data messages carry no session number. A message without a timestamp is not judged, and one in sequence is applied. |
 | Message applied to a session, newer than the NBIRTH that follows it, or a DBIRTH of the same millisecond | Applied again after that NBIRTH: it is of the new session, and arrived with the `seq` the session before expected |
 | A gap that is not filled | NCMD `Node Control/Rebirth` after `ReorderTimeout` (host), at once without it |
+| An NBIRTH within 2 seconds of the NDEATH of its `bdSeq` | Dropped, then NCMD `Node Control/Rebirth`: a will can overtake a rebirth in flight, seen with srad on HiveMQ CE. The specification does not cover this. An edge node that is alive answers the rebirth, also when it restarted with the same `bdSeq` |
 | Data or DBIRTH from a node without a birth | NCMD `Node Control/Rebirth` |
 | Any of the rebirth requests above | One pending per node: the next waits for the NBIRTH or 2 seconds, however many messages are out of order |
 | NDEATH whose `bdSeq` is not the birth's | Ignored: it is the will of an earlier session, which a broker may deliver late |
