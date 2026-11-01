@@ -7,7 +7,9 @@ package interop
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math"
+	"slices"
 	"testing"
 	"time"
 
@@ -25,6 +27,13 @@ type fixture struct {
 	Node     fxNode     `json:"node"`
 	Devices  []fxDevice `json:"devices"`
 	Updates  []fxUpdate `json:"updates"`
+
+	// ignoreProperties leaves properties out of comparisons, for a reference
+	// host that has a known bug with them.
+	ignoreProperties bool
+	// ignoreUInt32Cells leaves the UInt32 columns of DataSets out of
+	// comparisons, for a reference host that has a known bug with them.
+	ignoreUInt32Cells bool
 }
 
 type fxNode struct {
@@ -37,11 +46,18 @@ type fxDevice struct {
 }
 
 type fxMetric struct {
-	Name     string `json:"name"`
-	Alias    uint64 `json:"alias"`
-	Datatype string `json:"datatype"`
-	Value    any    `json:"value"`
-	Writable bool   `json:"writable"`
+	Name       string                `json:"name"`
+	Alias      uint64                `json:"alias"`
+	Datatype   string                `json:"datatype"`
+	Value      any                   `json:"value"`
+	Writable   bool                  `json:"writable"`
+	Properties map[string]fxProperty `json:"properties"`
+}
+
+// fxProperty is a property of a metric, as the container contract writes it.
+type fxProperty struct {
+	Type  string `json:"type"`
+	Value any    `json:"value"`
 }
 
 type fxValue struct {
@@ -57,7 +73,7 @@ type fxUpdate struct {
 // clone returns a deep copy, so a test can apply updates to its own state.
 func (f *fixture) clone() *fixture {
 	b, _ := json.Marshal(f)
-	out := &fixture{}
+	out := &fixture{ignoreProperties: f.ignoreProperties, ignoreUInt32Cells: f.ignoreUInt32Cells}
 	_ = json.Unmarshal(b, out)
 	return out
 }
@@ -164,6 +180,10 @@ func goValue(t testing.TB, datatype string, v any) any {
 		return v.(bool)
 	case "String", "Text":
 		return v.(string)
+	case "DataSet":
+		return goDataSet(t, v.(map[string]any))
+	case "Template":
+		return goTemplate(t, v.(map[string]any))
 	}
 	f, ok := v.(float64)
 	if !ok {
@@ -197,6 +217,90 @@ func goValue(t testing.TB, datatype string, v any) any {
 	return nil
 }
 
+func goDataSet(t testing.TB, v map[string]any) *pb.Payload_DataSet {
+	t.Helper()
+	var (
+		columns []string
+		names   []string
+		types   []pb.DataType
+		rows    [][]any
+	)
+	for _, c := range v["columns"].([]any) {
+		columns = append(columns, c.(string))
+	}
+	for _, n := range v["types"].([]any) {
+		names = append(names, n.(string))
+		types = append(types, dataType(t, n.(string)))
+	}
+	for _, r := range v["rows"].([]any) {
+		var row []any
+		for i, cell := range r.([]any) {
+			row = append(row, goValue(t, names[i], cell))
+		}
+		rows = append(rows, row)
+	}
+	m, err := payload.NewDataSet("", columns, types, rows)
+	if err != nil {
+		t.Fatalf("DataSet: %v", err)
+	}
+	return m.GetDatasetValue()
+}
+
+func goTemplate(t testing.TB, v map[string]any) *pb.Payload_Template {
+	t.Helper()
+	var params []*pb.Payload_Template_Parameter
+	for _, x := range v["parameters"].([]any) {
+		p := x.(map[string]any)
+		dt := p["type"].(string)
+		tp, err := payload.NewTemplateParameter(p["name"].(string), dataType(t, dt), goValue(t, dt, p["value"]))
+		if err != nil {
+			t.Fatalf("template parameter: %v", err)
+		}
+		params = append(params, tp)
+	}
+	var members []*pb.Payload_Metric
+	for _, x := range v["metrics"].([]any) {
+		m := x.(map[string]any)
+		dt := m["datatype"].(string)
+		tm, err := payload.NewMetric(m["name"].(string), dataType(t, dt), goValue(t, dt, m["value"]))
+		if err != nil {
+			t.Fatalf("template member: %v", err)
+		}
+		members = append(members, tm)
+	}
+	var (
+		m   *pb.Payload_Metric
+		err error
+	)
+	if v["isDefinition"].(bool) {
+		m, err = payload.NewTemplateDefinition("", v["version"].(string), members, params)
+	} else {
+		m, err = payload.NewTemplateInstance("", v["templateRef"].(string), members, params)
+	}
+	if err != nil {
+		t.Fatalf("template: %v", err)
+	}
+	return m.GetTemplateValue()
+}
+
+// goProperties sets the properties of a fixture metric on a birth metric.
+func goProperties(t testing.TB, m fxMetric, out *pb.Payload_Metric) {
+	t.Helper()
+	if len(m.Properties) == 0 {
+		return
+	}
+	out.Properties = &pb.Payload_PropertySet{}
+	for _, k := range slices.Sorted(maps.Keys(m.Properties)) {
+		p := m.Properties[k]
+		v, err := payload.NewPropertyValue(dataType(t, p.Type), goValue(t, p.Type, p.Value))
+		if err != nil {
+			t.Fatalf("property %s of %s: %v", k, m.Name, err)
+		}
+		out.Properties.Keys = append(out.Properties.Keys, k)
+		out.Properties.Values = append(out.Properties.Values, v)
+	}
+}
+
 // pbMetric builds a metric of the fixture with its name, and its alias when
 // withAlias is set.
 func pbMetric(t testing.TB, m fxMetric, withAlias bool) *pb.Payload_Metric {
@@ -228,15 +332,9 @@ func pbAliasMetric(t testing.TB, m fxMetric) *pb.Payload_Metric {
 	return out
 }
 
-// jsonValue converts a received metric to its value as the container
-// contract writes it: numbers for the numeric types and DateTime
-// (milliseconds), booleans, strings.
-func jsonValue(t testing.TB, m *pb.Payload_Metric) any {
+// jsonNumber is a number as the container contract writes it.
+func jsonNumber(t testing.TB, v any) any {
 	t.Helper()
-	v, err := payload.GetValue(m)
-	if err != nil {
-		t.Fatalf("value of %s: %v", m.GetName(), err)
-	}
 	switch x := v.(type) {
 	case nil, bool, string:
 		return x
@@ -263,8 +361,114 @@ func jsonValue(t testing.TB, m *pb.Payload_Metric) any {
 	case time.Time:
 		return float64(x.UnixMilli())
 	}
-	t.Fatalf("value of %s has unexpected type %T", m.GetName(), v)
+	t.Fatalf("value has unexpected type %T", v)
 	return nil
+}
+
+// jsonValue converts a received metric to its value as the container
+// contract writes it: numbers for the numeric types and DateTime
+// (milliseconds), booleans, strings, objects for DataSet and Template.
+func jsonValue(t testing.TB, m *pb.Payload_Metric) any {
+	t.Helper()
+	v, err := payload.GetValue(m)
+	if err != nil {
+		t.Fatalf("value of %s: %v", m.GetName(), err)
+	}
+	switch x := v.(type) {
+	case *pb.Payload_DataSet:
+		return jsonDataSet(t, m)
+	case *pb.Payload_Template:
+		return jsonTemplate(t, x)
+	}
+	return jsonNumber(t, v)
+}
+
+func jsonDataSet(t testing.TB, m *pb.Payload_Metric) any {
+	t.Helper()
+	columns, types, rows, err := payload.GetDataSetValues(m)
+	if err != nil {
+		t.Fatalf("DataSet %s: %v", m.GetName(), err)
+	}
+	names := []any{}
+	for _, dt := range types {
+		names = append(names, dt.String())
+	}
+	out := []any{}
+	for _, row := range rows {
+		cells := []any{}
+		for _, c := range row {
+			cells = append(cells, jsonNumber(t, c))
+		}
+		out = append(out, cells)
+	}
+	return map[string]any{"columns": columns, "types": names, "rows": out}
+}
+
+func jsonTemplate(t testing.TB, tmpl *pb.Payload_Template) any {
+	t.Helper()
+	params := []any{}
+	for _, p := range tmpl.GetParameters() {
+		v, err := payload.GetTemplateParameterValue(p)
+		if err != nil {
+			t.Fatalf("parameter %s: %v", p.GetName(), err)
+		}
+		params = append(params, map[string]any{"name": p.GetName(), "type": pb.DataType(p.GetType()).String(), "value": jsonNumber(t, v)})
+	}
+	members := []any{}
+	for _, m := range tmpl.GetMetrics() {
+		members = append(members, map[string]any{"name": m.GetName(), "datatype": pb.DataType(m.GetDatatype()).String(), "value": jsonValue(t, m)})
+	}
+	out := map[string]any{"isDefinition": tmpl.GetIsDefinition(), "parameters": params, "metrics": members}
+	if tmpl.GetVersion() != "" {
+		out["version"] = tmpl.GetVersion()
+	}
+	if tmpl.GetTemplateRef() != "" {
+		out["templateRef"] = tmpl.GetTemplateRef()
+	}
+	return out
+}
+
+// jsonProperties converts the properties of a received metric.
+func jsonProperties(t testing.TB, m *pb.Payload_Metric) map[string]fxProperty {
+	t.Helper()
+	ps := m.GetProperties()
+	if len(ps.GetKeys()) == 0 {
+		return nil
+	}
+	out := map[string]fxProperty{}
+	for i, k := range ps.GetKeys() {
+		v, err := payload.GetPropertyValue(ps.GetValues()[i])
+		if err != nil {
+			t.Fatalf("property %s of %s: %v", k, m.GetName(), err)
+		}
+		out[k] = fxProperty{Type: pb.DataType(ps.GetValues()[i].GetType()).String(), Value: jsonNumber(t, v)}
+	}
+	return out
+}
+
+// memberDatatypes gives the members of a template instance the datatypes of
+// the definition when they have none: data messages may omit them, as they do
+// for other metrics, and the Tahu edge does.
+func (f *fixture) memberDatatypes(t testing.TB, m *pb.Payload_Metric) {
+	t.Helper()
+	tmpl := m.GetTemplateValue()
+	if tmpl == nil || tmpl.GetIsDefinition() {
+		return
+	}
+	def, ok := f.metric("", tmpl.GetTemplateRef())
+	if !ok {
+		t.Fatalf("no template definition %q", tmpl.GetTemplateRef())
+	}
+	for _, member := range tmpl.GetMetrics() {
+		if member.Datatype != nil {
+			continue
+		}
+		for _, x := range def.Value.(map[string]any)["metrics"].([]any) {
+			if d := x.(map[string]any); d["name"] == member.GetName() {
+				withDatatype(member, d["datatype"].(string), t)
+			}
+		}
+	}
 }
 
 // sameValue compares two values as the container contract writes them.
@@ -276,14 +480,41 @@ func sameValue(a, b any) bool {
 	if okA && okB {
 		return fa == fb || (math.IsNaN(fa) && math.IsNaN(fb))
 	}
+	if _, ok := a.(map[string]any); ok {
+		ja, errA := json.Marshal(a)
+		jb, errB := json.Marshal(b)
+		return errA == nil && errB == nil && string(ja) == string(jb)
+	}
 	return fmt.Sprint(a) == fmt.Sprint(b) && fmt.Sprintf("%T", a) == fmt.Sprintf("%T", b)
 }
 
 // metricValue is a metric as the container contract writes it.
 type metricValue struct {
-	Name     string `json:"name"`
-	Datatype string `json:"datatype"`
-	Value    any    `json:"value"`
+	Name       string                `json:"name"`
+	Datatype   string                `json:"datatype"`
+	Value      any                   `json:"value"`
+	Properties map[string]fxProperty `json:"properties"`
+}
+
+// withoutUInt32Cells returns the metric with the UInt32 cells of a DataSet zero.
+func (m metricValue) withoutUInt32Cells() metricValue {
+	ds, ok := m.Value.(map[string]any)
+	if !ok || m.Datatype != "DataSet" {
+		return m
+	}
+	b, _ := json.Marshal(ds)
+	out := map[string]any{}
+	_ = json.Unmarshal(b, &out)
+	types := out["types"].([]any)
+	for _, r := range out["rows"].([]any) {
+		for i, t := range types {
+			if t == "UInt32" {
+				r.([]any)[i] = float64(0)
+			}
+		}
+	}
+	m.Value = out
+	return m
 }
 
 func (m metricValue) String() string { return fmt.Sprintf("%s(%s)=%v", m.Name, m.Datatype, m.Value) }
@@ -293,7 +524,11 @@ func (m metricValue) String() string { return fmt.Sprintf("%s(%s)=%v", m.Name, m
 func (f *fixture) expected(device string) []metricValue {
 	var out []metricValue
 	for _, m := range f.metrics(device) {
-		out = append(out, metricValue{Name: m.Name, Datatype: m.Datatype, Value: m.Value})
+		mv := metricValue{Name: m.Name, Datatype: m.Datatype, Value: m.Value}
+		if !f.ignoreProperties {
+			mv.Properties = m.Properties
+		}
+		out = append(out, mv)
 	}
 	return out
 }

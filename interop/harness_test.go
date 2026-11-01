@@ -239,6 +239,10 @@ var knownBugs = []knownBugEntry{
 	{"sparkplughost", "v0.4.0", "host", "nanomq|hivemq-ce", "", []string{"*"}, reorderBug},
 	{"sparkplugnet", "1.4.1", "host", "", "", []string{"device-death-birth", "graceful-death", "will"},
 		"SparkplugApplication updates its node and device states on NDEATH and DDEATH through a lazy iterator it never enumerates: dead nodes and devices stay online"},
+	{"sparkplugnet", "1.4.1", "host", "", "composite", []string{"properties"},
+		"PayloadConverter.ConvertVersionBMetric copies no Properties from the protobuf metric: a host gets a metric without its properties"},
+	{"sparkplugnet", "1.4.1", "host", "", "composite", []string{"dataset-uint32"},
+		"PayloadConverter reads a UInt32 DataSet cell from long_value only: in int_value, where Sparkplug puts UInt32 and go-sparkplugb encodes it, it reads 0"},
 	{"sparkplugnet", "1.4.1", "edge", "", "baseline", []string{"writes", "device-death-birth"},
 		"SparkplugNode filters the metrics of a DCMD against the node's metrics, not the device's: a device write is dropped"},
 }

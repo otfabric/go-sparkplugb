@@ -30,7 +30,7 @@ func TestEdge(t *testing.T) {
 			if !a.isHost(t) {
 				continue
 			}
-			for _, fx := range []string{"baseline", "scalars"} {
+			for _, fx := range []string{"baseline", "scalars", "composite"} {
 				t.Run(fmt.Sprintf("%s/%s/%s", b.name, a.name, fx), func(t *testing.T) {
 					f := a.fixture(t, fx)
 					if missing := a.hostAccepts(t, f); len(missing) > 0 {
@@ -141,7 +141,9 @@ func (le *libEdge) commandCount() int {
 func (le *libEdge) births(ctx context.Context) error {
 	var node []*pb.Payload_Metric
 	for _, m := range le.f.Node.Metrics {
-		node = append(node, pbMetric(le.t, m, true))
+		pm := pbMetric(le.t, m, true)
+		goProperties(le.t, m, pm)
+		node = append(node, pm)
 	}
 	if err := le.node.PublishBirth(ctx, node); err != nil {
 		return fmt.Errorf("NBIRTH: %w", err)
@@ -214,13 +216,35 @@ func onlyFixture(f *fixture, device string, ms []metricValue) []metricValue {
 func checkMessage(t *testing.T, f *fixture, ev event, want []metricValue) {
 	t.Helper()
 	got := onlyFixture(f, ev.device(), ev.Metrics)
-	if !sameMetrics(got, append([]metricValue(nil), want...)) {
+	if f.ignoreProperties {
+		for i := range got {
+			got[i].Properties = nil
+		}
+	}
+	want = append([]metricValue(nil), want...)
+	if f.ignoreUInt32Cells {
+		for i := range got {
+			got[i] = got[i].withoutUInt32Cells()
+		}
+		for i := range want {
+			want[i] = want[i].withoutUInt32Cells()
+		}
+	}
+	if !sameMetrics(got, want) {
 		t.Errorf("%s: host reported %v, want %v", ev, got, want)
 	}
 }
 
 func runEdge(t *testing.T, w *world, a adapter, f *fixture) {
 	const refHostID = "reference-host"
+	if bug, known := a.knownBug(t, "host", w.broker.name, f.Name, "properties"); known {
+		t.Logf("properties not compared, known bug of %s: %s", a.name, bug)
+		f.ignoreProperties = true
+	}
+	if bug, known := a.knownBug(t, "host", w.broker.name, f.Name, "dataset-uint32"); known {
+		t.Logf("UInt32 cells not compared, known bug of %s: %s", a.name, bug)
+		f.ignoreUInt32Cells = true
+	}
 	edgeNode := "g-" + a.name
 	h := w.start(a, "host", "--host-id", refHostID)
 

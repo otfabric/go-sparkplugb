@@ -6,6 +6,7 @@ package interop
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -164,7 +165,12 @@ func snapshot(t testing.TB, metrics map[string]*pb.Payload_Metric, f *fixture, d
 			continue
 		}
 		dt := pb.DataType(m.GetDatatype()).String()
-		out = append(out, metricValue{Name: fm.Name, Datatype: dt, Value: jsonValue(t, m)})
+		f.memberDatatypes(t, m)
+		mv := metricValue{Name: fm.Name, Datatype: dt, Value: jsonValue(t, m)}
+		if !f.ignoreProperties {
+			mv.Properties = jsonProperties(t, m)
+		}
+		out = append(out, mv)
 	}
 	return out
 }
@@ -176,11 +182,18 @@ func sameMetrics(a, b []metricValue) bool {
 	sort.Slice(a, func(i, j int) bool { return a[i].Name < a[j].Name })
 	sort.Slice(b, func(i, j int) bool { return b[i].Name < b[j].Name })
 	for i := range a {
-		if a[i].Name != b[i].Name || a[i].Datatype != b[i].Datatype || !sameValue(a[i].Value, b[i].Value) {
+		if a[i].Name != b[i].Name || a[i].Datatype != b[i].Datatype || !sameValue(a[i].Value, b[i].Value) ||
+			!sameProperties(a[i].Properties, b[i].Properties) {
 			return false
 		}
 	}
 	return true
+}
+
+func sameProperties(a, b map[string]fxProperty) bool {
+	ja, errA := json.Marshal(a)
+	jb, errB := json.Marshal(b)
+	return errA == nil && errB == nil && string(ja) == string(jb)
 }
 
 // expectState waits until the go-sparkplugb host knows the node and every
@@ -279,6 +292,52 @@ func checkIntForm(t *testing.T, a adapter, f *fixture, got map[string]*pb.Payloa
 		}
 		if raw := got[m.Name].GetIntValue(); raw != want {
 			t.Errorf("%s of %s on the wire is %#x, want %#x", m.Name, a.name, raw, want)
+		}
+	}
+	// Int8 and Int16 inside composite values: the fixture gives the value, the
+	// wire value has the form of the reference.
+	wire := func(where, datatype string, v any, raw uint32) {
+		bits := map[string]uint{"Int8": 8, "Int16": 16}[datatype]
+		n, ok := v.(float64)
+		if bits == 0 || !ok {
+			return
+		}
+		want := uint32(int32(n))
+		if widthSizedEdges[a.name] {
+			want &= 1<<bits - 1
+		}
+		if raw != want {
+			t.Errorf("%s of %s on the wire is %#x, want %#x", where, a.name, raw, want)
+		}
+	}
+	for _, m := range f.Node.Metrics {
+		pm := got[m.Name]
+		if pm == nil {
+			continue
+		}
+		for i, k := range pm.GetProperties().GetKeys() {
+			wire(m.Name+" property "+k, m.Properties[k].Type, m.Properties[k].Value, pm.GetProperties().GetValues()[i].GetIntValue())
+		}
+		switch v := m.Value.(type) {
+		case map[string]any:
+			if ds := pm.GetDatasetValue(); ds != nil {
+				types := v["types"].([]any)
+				for i, row := range v["rows"].([]any) {
+					for j, cell := range row.([]any) {
+						wire(fmt.Sprintf("%s cell %d,%d", m.Name, i, j), types[j].(string), cell, ds.GetRows()[i].GetElements()[j].GetIntValue())
+					}
+				}
+			}
+			if tmpl := pm.GetTemplateValue(); tmpl != nil {
+				for i, x := range v["parameters"].([]any) {
+					p := x.(map[string]any)
+					wire(m.Name+" parameter "+p["name"].(string), p["type"].(string), p["value"], tmpl.GetParameters()[i].GetIntValue())
+				}
+				for i, x := range v["metrics"].([]any) {
+					member := x.(map[string]any)
+					wire(m.Name+" member "+member["name"].(string), member["datatype"].(string), member["value"], tmpl.GetMetrics()[i].GetIntValue())
+				}
+			}
 		}
 	}
 }

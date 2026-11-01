@@ -90,7 +90,7 @@ or `uint64`: it is checked by the table above and written in the form above.
 Besides its own tests, the library is run on every push against six
 independent implementations, in every role they have, on four MQTT brokers.
 The reference builds are the images of
-[otfabric/sparkplugb-interop v0.1.0](https://github.com/otfabric/sparkplugb-interop/releases/tag/v0.1.0),
+[otfabric/sparkplugb-interop v0.3.0](https://github.com/otfabric/sparkplugb-interop/releases/tag/v0.3.0),
 pinned in [interop/images.go](interop/images.go):
 
 | Reference | Version | go-sparkplugb host and application ← reference edge | go-sparkplugb edge → reference host |
@@ -103,6 +103,14 @@ pinned in [interop/images.go](interop/images.go):
 | EvergenEnergy/sparkplughost | v0.4.0 | (host only) | pass ⁵ |
 
 on Eclipse Mosquitto 2.1.2, HiveMQ CE 2026.5, EMQX 6.3.2 and NanoMQ 0.25.7.
+
+The `composite` fixture runs DataSets, templates and properties with integers at
+each type's limits. Tahu, tahu-js and SparkplugNet run it as edges against the
+library's host and application, Tahu, SparkplugNet and sparkplughost as hosts
+against its edge. The suite checks the form of each Int8 and Int16 on the wire, in
+each of those places. On the SparkplugNet host, properties are not compared, and
+UInt32 DataSet cells neither: it drops the first and reads the second from
+`long_value` only, where the library writes `int_value` as the specification says.
 
 ¹ pysparkplug's NDEATH on a clean stop carries `bdSeq + 1`, so the
 node does not go offline on it; the will after a crash is checked instead.
