@@ -106,10 +106,12 @@ type Application struct {
 
 	rebirthAsked  map[string]time.Time   // nodeKey -> last rebirth request the application made itself
 	rebirthMissed map[string]bool        // nodeKey -> a request was throttled while one was pending
+	deaths        map[string]death       // nodeKey -> last NDEATH
 	held          map[string][]heldMsg   // nodeKey -> messages ahead of their sequence
 	sessions      map[string]*session    // nodeKey -> current session
 	sessionTimers map[string]*time.Timer // nodeKey -> pending wait for an NBIRTH
 	sessionWait   time.Duration          // sessionWait, shorter in tests
+	lateBirthWait time.Duration          // lateBirthWait, shorter in tests
 }
 
 func New(transport mqtt.Transport, cfg Config) (*Application, error) {
@@ -133,7 +135,8 @@ func New(transport mqtt.Transport, cfg Config) (*Application, error) {
 		nodes:     make(map[string]*EdgeNodeState),
 		closeCh:   make(chan struct{}),
 
-		sessionWait: sessionWait,
+		sessionWait:   sessionWait,
+		lateBirthWait: lateBirthWait,
 	}, nil
 }
 
@@ -559,6 +562,64 @@ func (a *Application) drain(t topic.Topic) {
 	}
 }
 
+// lateBirthWait is how long after an NDEATH an NBIRTH with its bdSeq is taken
+// for one the broker delivered late (see lateBirth).
+const lateBirthWait = 250 * time.Millisecond
+
+// death is the last NDEATH of an edge node.
+type death struct {
+	bdSeq uint64
+	at    time.Time
+}
+
+func bdSeqOf(p *pb.Payload) (uint64, bool) {
+	for _, m := range p.Metrics {
+		if m.GetName() == "bdSeq" {
+			return m.GetLongValue(), true
+		}
+	}
+	return 0, false
+}
+
+// lateBirth reports whether an NBIRTH is of a session whose NDEATH arrived
+// just before it. MQTT orders messages per topic only, so a broker may deliver
+// a will ahead of a rebirth that was in flight when the edge node died; that
+// NBIRTH must not bring a dead node back online. A message carries no proof
+// of being late, and an edge node that restarts with the bdSeq of its NDEATH
+// looks the same (srad and SparkplugNet start at 0), so only the time tells:
+// a late NBIRTH follows within milliseconds, a restart takes longer. Within
+// lateBirthWait of the NDEATH such an NBIRTH is dropped and a rebirth is
+// requested after sessionWait, for an edge node that was that fast. died reports that the node went offline
+// here: its NDEATH had a bdSeq ahead of the session the host knew, and was
+// ignored until this NBIRTH matched it. Called with a.mu held.
+func (a *Application) lateBirth(t topic.Topic, p *pb.Payload) (late, died bool) {
+	key := nodeKey(t.GroupID, t.EdgeNodeID)
+	d, ok := a.deaths[key]
+	if !ok {
+		return false, false
+	}
+	if bd, has := bdSeqOf(p); !has || bd != d.bdSeq || time.Since(d.at) > a.lateBirthWait {
+		delete(a.deaths, key)
+		return false, false
+	}
+	delete(a.rebirthAsked, key) // what it answered is dropped with it
+	a.expectSession(t)
+	if ns := a.nodes[key]; ns != nil && ns.Online {
+		setOffline(ns)
+		died = true
+	}
+	return true, died
+}
+
+func setOffline(ns *EdgeNodeState) {
+	ns.Online = false
+	ns.Stale = true
+	for _, dev := range ns.Devices {
+		dev.Online = false
+		dev.Stale = true
+	}
+}
+
 func (a *Application) handleNBIRTH(t topic.Topic, data []byte) {
 	p, err := payload.Decode(data)
 	if err != nil {
@@ -567,6 +628,17 @@ func (a *Application) handleNBIRTH(t topic.Topic, data []byte) {
 	}
 
 	a.mu.Lock()
+	if late, died := a.lateBirth(t, p); late {
+		a.mu.Unlock()
+		a.cfg.Logger.Debugf("%s/%s: dropped NBIRTH: its session has ended", t.GroupID, t.EdgeNodeID)
+		if died {
+			a.cfg.Metrics.OnNodeDeath(t.GroupID, t.EdgeNodeID)
+			if a.cfg.OnNodeDeath != nil {
+				a.cfg.OnNodeDeath(t.GroupID, t.EdgeNodeID)
+			}
+		}
+		return
+	}
 	key := nodeKey(t.GroupID, t.EdgeNodeID)
 	ns := &EdgeNodeState{
 		GroupID:    t.GroupID,
@@ -645,6 +717,12 @@ func (a *Application) handleNDEATH(t topic.Topic, data []byte) {
 
 	a.mu.Lock()
 	key := nodeKey(t.GroupID, t.EdgeNodeID)
+	if bd, ok := bdSeqOf(p); ok {
+		if a.deaths == nil {
+			a.deaths = make(map[string]death)
+		}
+		a.deaths[key] = death{bdSeq: bd, at: time.Now()}
+	}
 	ns := a.nodes[key]
 	if ns != nil {
 		for _, m := range p.Metrics {
@@ -657,12 +735,7 @@ func (a *Application) handleNDEATH(t topic.Topic, data []byte) {
 				}
 			}
 		}
-		ns.Online = false
-		ns.Stale = true
-		for _, dev := range ns.Devices {
-			dev.Online = false
-			dev.Stale = true
-		}
+		setOffline(ns)
 	}
 	a.mu.Unlock()
 
@@ -691,7 +764,7 @@ func (a *Application) handleDBIRTH(t topic.Topic, data []byte) {
 		}
 		ds := &DeviceState{
 			DeviceID: t.DeviceID,
-			Online:   true,
+			Online:   ns.Online,
 			Metrics:  make(map[string]*pb.Payload_Metric),
 			Aliases:  make(map[uint64]string),
 		}
