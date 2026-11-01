@@ -46,7 +46,10 @@ func NewTemplateInstance(name, templateRef string, metrics []*pb.Payload_Metric,
 	return m, nil
 }
 
-// NewTemplateParameter creates a template parameter with the given name, type, and value.
+// NewTemplateParameter creates a template parameter with the given name, type,
+// and value. The value has the Go type GetValue returns for the datatype. For
+// an integer the wire type, uint32 or uint64, is also taken, as long as it is a
+// value of the datatype; a value that is not returns ErrTypeMismatch.
 func NewTemplateParameter(name string, dt pb.DataType, v any) (*pb.Payload_Template_Parameter, error) {
 	t := uint32(dt)
 	p := &pb.Payload_Template_Parameter{
@@ -54,20 +57,20 @@ func NewTemplateParameter(name string, dt pb.DataType, v any) (*pb.Payload_Templ
 		Type: &t,
 	}
 
+	if isIntegerType(dt) {
+		u, err := encodeIntegerOrRaw(dt, v)
+		if err != nil {
+			return nil, err
+		}
+		if usesLongValue(dt) {
+			p.Value = &pb.Payload_Template_Parameter_LongValue{LongValue: u}
+		} else {
+			p.Value = &pb.Payload_Template_Parameter_IntValue{IntValue: uint32(u)}
+		}
+		return p, nil
+	}
+
 	switch dt {
-	case pb.DataType_Int8, pb.DataType_Int16, pb.DataType_Int32,
-		pb.DataType_UInt8, pb.DataType_UInt16, pb.DataType_UInt32:
-		val, ok := v.(uint32)
-		if !ok {
-			return nil, ErrTypeMismatch
-		}
-		p.Value = &pb.Payload_Template_Parameter_IntValue{IntValue: val}
-	case pb.DataType_Int64, pb.DataType_UInt64:
-		val, ok := v.(uint64)
-		if !ok {
-			return nil, ErrTypeMismatch
-		}
-		p.Value = &pb.Payload_Template_Parameter_LongValue{LongValue: val}
 	case pb.DataType_Float:
 		val, ok := v.(float32)
 		if !ok {
@@ -98,19 +101,30 @@ func NewTemplateParameter(name string, dt pb.DataType, v any) (*pb.Payload_Templ
 	return p, nil
 }
 
-// GetTemplateParameterValue extracts the Go value from a template parameter.
+// GetTemplateParameterValue extracts the Go value from a template parameter. It
+// has the Go type GetValue returns for the datatype: integers and DateTime are
+// decoded by the rules of GetValue, and one that is not a value of the datatype
+// returns ErrTypeMismatch. The members of a template are metrics: GetValue reads
+// them.
 func GetTemplateParameterValue(p *pb.Payload_Template_Parameter) (any, error) {
 	if p == nil {
 		return nil, ErrNilMetric
 	}
 
 	dt := pb.DataType(p.GetType())
+	if isIntegerType(dt) {
+		switch v := p.Value.(type) {
+		case nil:
+			return decodeInteger(dt, 0)
+		case *pb.Payload_Template_Parameter_IntValue:
+			return decodeInteger(dt, uint64(v.IntValue))
+		case *pb.Payload_Template_Parameter_LongValue:
+			return decodeInteger(dt, v.LongValue)
+		}
+		return nil, ErrTypeMismatch
+	}
+
 	switch dt {
-	case pb.DataType_Int8, pb.DataType_Int16, pb.DataType_Int32,
-		pb.DataType_UInt8, pb.DataType_UInt16, pb.DataType_UInt32:
-		return p.GetIntValue(), nil
-	case pb.DataType_Int64, pb.DataType_UInt64:
-		return p.GetLongValue(), nil
 	case pb.DataType_Float:
 		return p.GetFloatValue(), nil
 	case pb.DataType_Double:

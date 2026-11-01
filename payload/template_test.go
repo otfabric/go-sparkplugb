@@ -112,20 +112,21 @@ func TestTemplateParameterTypes(t *testing.T) {
 		name string
 		dt   pb.DataType
 		val  any
+		want any
 	}{
-		{"uint32", pb.DataType_UInt32, uint32(42)},
-		{"uint64", pb.DataType_UInt64, uint64(100)},
-		{"float", pb.DataType_Float, float32(3.14)},
-		{"double", pb.DataType_Double, float64(2.718)},
-		{"bool", pb.DataType_Boolean, true},
-		{"string", pb.DataType_String, "hello"},
-		{"text", pb.DataType_Text, "world"},
-		{"int8", pb.DataType_Int8, uint32(8)},
-		{"int16", pb.DataType_Int16, uint32(16)},
-		{"int32", pb.DataType_Int32, uint32(32)},
-		{"uint8", pb.DataType_UInt8, uint32(8)},
-		{"uint16", pb.DataType_UInt16, uint32(16)},
-		{"int64", pb.DataType_Int64, uint64(64)},
+		{"uint32", pb.DataType_UInt32, uint32(42), uint32(42)},
+		{"uint64", pb.DataType_UInt64, uint64(100), uint64(100)},
+		{"float", pb.DataType_Float, float32(3.14), float32(3.14)},
+		{"double", pb.DataType_Double, float64(2.718), float64(2.718)},
+		{"bool", pb.DataType_Boolean, true, true},
+		{"string", pb.DataType_String, "hello", "hello"},
+		{"text", pb.DataType_Text, "world", "world"},
+		{"int8", pb.DataType_Int8, uint32(8), int8(8)},
+		{"int16", pb.DataType_Int16, uint32(16), int16(16)},
+		{"int32", pb.DataType_Int32, uint32(32), int32(32)},
+		{"uint8", pb.DataType_UInt8, uint32(8), uint8(8)},
+		{"uint16", pb.DataType_UInt16, uint32(16), uint16(16)},
+		{"int64", pb.DataType_Int64, uint64(64), int64(64)},
 	}
 
 	for _, tc := range tests {
@@ -138,8 +139,8 @@ func TestTemplateParameterTypes(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got != tc.val {
-				t.Errorf("got %v, want %v", got, tc.val)
+			if got != tc.want {
+				t.Errorf("got %v (%T), want %v (%T)", got, got, tc.want, tc.want)
 			}
 		})
 	}

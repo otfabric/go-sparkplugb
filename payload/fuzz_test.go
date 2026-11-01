@@ -4,6 +4,8 @@ package payload
 
 import (
 	"errors"
+	"math"
+	"reflect"
 	"testing"
 
 	pb "github.com/otfabric/go-sparkplugb/proto"
@@ -135,4 +137,98 @@ func FuzzDecodeStringArray(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte) {
 		_, _ = decodeStringArray(data)
 	})
+}
+
+// FuzzIntegerPaths checks the integer rule of the four places an integer is
+// carried, the metric, the DataSet cell, the template parameter and the
+// PropertyValue, against a statement of it that does not use the decoder: they
+// agree, a value out of the datatype's range is rejected, and an accepted value
+// encodes to a wire value that reads back the same.
+func FuzzIntegerPaths(f *testing.F) {
+	for _, wire := range []uint64{0, 0x7F, 0x80, 0xFF, 0x100, 0x7FFF, 0x8000, 0xFFFF, 0x10000,
+		0x7FFFFFFF, 0x80000000, 0xFFFFFF80, 0xFFFFFFFF, 0x100000000, 0x1FFFFFFF8,
+		math.MaxInt64, 1 << 63, math.MaxUint64 - 127, math.MaxUint64} {
+		for _, long := range []bool{false, true} {
+			for dt := uint8(1); dt <= 13; dt++ {
+				f.Add(dt, wire, long)
+			}
+		}
+	}
+
+	f.Fuzz(func(t *testing.T, dtByte uint8, wire uint64, long bool) {
+		dt := pb.DataType(dtByte)
+		if !isIntegerType(dt) {
+			return
+		}
+		if !long {
+			wire = uint64(uint32(wire))
+		}
+		var want any
+		var wantErr error
+		for i, read := range integerReaders {
+			got, err := read(dt, wire, long)
+			if i == 0 {
+				want, wantErr = got, err
+				if ok := integerInRange(dt, wire); ok != (err == nil) {
+					t.Fatalf("%v from %#x: got %v, %v; in range: %v", dt, wire, got, err, ok)
+				}
+				if err != nil && !errors.Is(err, ErrTypeMismatch) {
+					t.Fatalf("%v from %#x: %v", dt, wire, err)
+				}
+				continue
+			}
+			if !reflect.DeepEqual(got, want) || !errors.Is(err, wantErr) {
+				t.Fatalf("%v from %#x: path %d got %v, %v; path 0 got %v, %v", dt, wire, i, got, err, want, wantErr)
+			}
+		}
+		if wantErr != nil {
+			return
+		}
+		u, err := encodeInteger(dt, want)
+		if err != nil {
+			t.Fatalf("%v %v: %v", dt, want, err)
+		}
+		if !usesLongValue(dt) && u > math.MaxUint32 {
+			t.Fatalf("%v %v encoded to %#x", dt, want, u)
+		}
+		back, err := decodeInteger(dt, u)
+		if err != nil || !reflect.DeepEqual(back, want) {
+			t.Fatalf("%v %v encoded to %#x, read back %v, %v", dt, want, u, back, err)
+		}
+	})
+}
+
+// integerInRange states, by the value range of each datatype, which wire values
+// are integers of dt: a 32- or 64-bit two's-complement form of a value in range
+// for the signed types, the value itself for the unsigned ones.
+func integerInRange(dt pb.DataType, wire uint64) bool {
+	signed := func(bits uint) bool {
+		lo, hi := int64(-1)<<(bits-1), int64(1)<<(bits-1)-1
+		as32, as64 := int64(int32(uint32(wire))), int64(wire)
+		switch {
+		case wire < 1<<bits: // the width-sized form
+			return true
+		case wire <= math.MaxUint32:
+			return as32 >= lo && as32 <= hi
+		default:
+			return as64 >= lo && as64 <= hi
+		}
+	}
+	switch dt {
+	case pb.DataType_Int8:
+		return signed(8)
+	case pb.DataType_Int16:
+		return signed(16)
+	case pb.DataType_Int32:
+		return signed(32)
+	case pb.DataType_UInt8:
+		return wire <= math.MaxUint8
+	case pb.DataType_UInt16:
+		return wire <= math.MaxUint16
+	case pb.DataType_UInt32:
+		return wire <= math.MaxUint32
+	case pb.DataType_DateTime:
+		return wire <= math.MaxInt64
+	}
+	return true // Int64 and UInt64
 }

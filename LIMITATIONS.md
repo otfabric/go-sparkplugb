@@ -36,5 +36,12 @@ stacks, are in [INTEROPERABILITY.md](INTEROPERABILITY.md#on-the-wire).
 - Negative Int8 and Int16: go-sparkplugb sign-extends on encoding, which the
   pysparkplug host cannot decode, and accepts both forms on decoding
   ([specification ambiguity](INTEROPERABILITY.md#negative-int8-and-int16)).
-- DataSet values and template parameters of type Int8 and Int16 are raw
-  `uint32` values in the API: neither form is applied or checked.
+- A value out of its datatype's range is rejected on decoding, in metrics,
+  DataSet cells, template parameters and properties
+  ([Integers](INTEROPERABILITY.md#integers)). The specification does not say what
+  a receiver does with one: this library's reading. A stack that truncates accepts
+  what this library refuses.
+- An Int64 or UInt64 in `int_value`, against the specification's `uint64`, is read
+  zero-extended: a negative Int64 sent that way reads as a large positive value.
+- `GetQuality`, `bdSeq` and `seq` take the types the specification gives them;
+  `host` and `app` read `bdSeq` from `long_value` only.

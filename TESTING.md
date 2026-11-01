@@ -5,7 +5,7 @@
 | `make test` | Library tests with `-race`; needs no broker |
 | `make stress` | The same, shuffled, twice |
 | `make coverage` / `make coverage-gate` | Coverage over `COVER_PKGS`; fails below `COVER_MIN` (90) |
-| `make fuzz` | `FuzzDecode`, `FuzzDecodeSignedInt`, `FuzzDecodeBooleanArray`, `FuzzDecodeStringArray`, `FuzzParse`, for `FUZZTIME` each (30s) |
+| `make fuzz` | `FuzzDecode`, `FuzzDecodeSignedInt`, `FuzzIntegerPaths`, `FuzzDecodeBooleanArray`, `FuzzDecodeStringArray`, `FuzzParse`, for `FUZZTIME` each (30s) |
 | `make bench` | Benchmarks |
 | `make e2e` | `TestE2E*`: the three runtimes over `PahoTransport` against a fake broker on loopback TCP |
 | `make interop` | The `interop/` module against the sparkplugb-interop images and four brokers (Docker) |

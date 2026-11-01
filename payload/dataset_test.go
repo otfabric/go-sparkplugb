@@ -211,17 +211,19 @@ func TestDataSetEmptyRows(t *testing.T) {
 }
 
 func TestExtractDataSetValueNil(t *testing.T) {
-	v := extractDataSetValue(nil)
-	if v != nil {
-		t.Errorf("expected nil, got %v", v)
+	v, err := extractDataSetValue(pb.DataType_Int8, nil)
+	if v != nil || err != nil {
+		t.Errorf("expected nil, got %v, %v", v, err)
 	}
 }
 
 func TestExtractDataSetValueUnknown(t *testing.T) {
 	dsv := &pb.Payload_DataSet_DataSetValue{}
-	v := extractDataSetValue(dsv)
-	if v != nil {
-		t.Errorf("expected nil for empty value, got %v", v)
+	for _, dt := range []pb.DataType{pb.DataType_Int8, pb.DataType_String} {
+		v, err := extractDataSetValue(dt, dsv)
+		if v != nil || err != nil {
+			t.Errorf("%v: expected nil for empty value, got %v, %v", dt, v, err)
+		}
 	}
 }
 

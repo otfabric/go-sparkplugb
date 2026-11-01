@@ -13,6 +13,11 @@ var ErrColumnMismatch = errors.New("sparkplugb: column count mismatch")
 // NewDataSet creates a DataSet metric. columns defines the column names,
 // types the DataType for each column, and rows is a [][]any where each
 // inner slice has one value per column.
+//
+// A value has the Go type GetValue returns for its column's datatype. For an
+// integer column the wire type, uint32 or uint64, is also taken, as long as it
+// is a value of the column's datatype. A value that is not returns
+// ErrTypeMismatch.
 func NewDataSet(name string, columns []string, types []pb.DataType, rows [][]any) (*pb.Payload_Metric, error) {
 	if len(columns) != len(types) {
 		return nil, ErrColumnMismatch
@@ -55,7 +60,11 @@ func NewDataSet(name string, columns []string, types []pb.DataType, rows [][]any
 	return m, nil
 }
 
-// GetDataSetValues extracts all rows from a DataSet metric as [][]any.
+// GetDataSetValues extracts all rows from a DataSet metric as [][]any. A value
+// has the Go type GetValue returns for its column's datatype: integers and
+// DateTime are decoded by the rules of GetValue, and one that is not a value of
+// its column returns ErrTypeMismatch. A cell without a value is nil. A row with
+// more cells than the DataSet has types returns ErrColumnMismatch.
 func GetDataSetValues(m *pb.Payload_Metric) (columns []string, types []pb.DataType, rows [][]any, err error) {
 	if m == nil {
 		return nil, nil, nil, ErrNilMetric
@@ -73,7 +82,13 @@ func GetDataSetValues(m *pb.Payload_Metric) (columns []string, types []pb.DataTy
 	for _, row := range ds.GetRows() {
 		vals := make([]any, len(row.GetElements()))
 		for j, elem := range row.GetElements() {
-			vals[j] = extractDataSetValue(elem)
+			if j >= len(types) {
+				return nil, nil, nil, ErrColumnMismatch
+			}
+			vals[j], err = extractDataSetValue(types[j], elem)
+			if err != nil {
+				return nil, nil, nil, err
+			}
 		}
 		rows = append(rows, vals)
 	}
@@ -82,20 +97,19 @@ func GetDataSetValues(m *pb.Payload_Metric) (columns []string, types []pb.DataTy
 
 func newDataSetValue(dt pb.DataType, v any) (*pb.Payload_DataSet_DataSetValue, error) {
 	dsv := &pb.Payload_DataSet_DataSetValue{}
+	if isIntegerType(dt) {
+		u, err := encodeIntegerOrRaw(dt, v)
+		if err != nil {
+			return nil, err
+		}
+		if usesLongValue(dt) {
+			dsv.Value = &pb.Payload_DataSet_DataSetValue_LongValue{LongValue: u}
+		} else {
+			dsv.Value = &pb.Payload_DataSet_DataSetValue_IntValue{IntValue: uint32(u)}
+		}
+		return dsv, nil
+	}
 	switch dt {
-	case pb.DataType_Int8, pb.DataType_Int16, pb.DataType_Int32,
-		pb.DataType_UInt8, pb.DataType_UInt16, pb.DataType_UInt32:
-		val, ok := v.(uint32)
-		if !ok {
-			return nil, ErrTypeMismatch
-		}
-		dsv.Value = &pb.Payload_DataSet_DataSetValue_IntValue{IntValue: val}
-	case pb.DataType_Int64, pb.DataType_UInt64:
-		val, ok := v.(uint64)
-		if !ok {
-			return nil, ErrTypeMismatch
-		}
-		dsv.Value = &pb.Payload_DataSet_DataSetValue_LongValue{LongValue: val}
 	case pb.DataType_Float:
 		val, ok := v.(float32)
 		if !ok {
@@ -126,25 +140,36 @@ func newDataSetValue(dt pb.DataType, v any) (*pb.Payload_DataSet_DataSetValue, e
 	return dsv, nil
 }
 
-func extractDataSetValue(dsv *pb.Payload_DataSet_DataSetValue) any {
+func extractDataSetValue(dt pb.DataType, dsv *pb.Payload_DataSet_DataSetValue) (any, error) {
 	if dsv == nil {
-		return nil
+		return nil, nil
+	}
+	if isIntegerType(dt) {
+		switch v := dsv.Value.(type) {
+		case nil:
+			return nil, nil
+		case *pb.Payload_DataSet_DataSetValue_IntValue:
+			return decodeInteger(dt, uint64(v.IntValue))
+		case *pb.Payload_DataSet_DataSetValue_LongValue:
+			return decodeInteger(dt, v.LongValue)
+		}
+		return nil, ErrTypeMismatch
 	}
 	switch v := dsv.Value.(type) {
 	case *pb.Payload_DataSet_DataSetValue_IntValue:
-		return v.IntValue
+		return v.IntValue, nil
 	case *pb.Payload_DataSet_DataSetValue_LongValue:
-		return v.LongValue
+		return v.LongValue, nil
 	case *pb.Payload_DataSet_DataSetValue_FloatValue:
-		return v.FloatValue
+		return v.FloatValue, nil
 	case *pb.Payload_DataSet_DataSetValue_DoubleValue:
-		return v.DoubleValue
+		return v.DoubleValue, nil
 	case *pb.Payload_DataSet_DataSetValue_BooleanValue:
-		return v.BooleanValue
+		return v.BooleanValue, nil
 	case *pb.Payload_DataSet_DataSetValue_StringValue:
-		return v.StringValue
+		return v.StringValue, nil
 	default:
-		return nil
+		return nil, nil
 	}
 }
 

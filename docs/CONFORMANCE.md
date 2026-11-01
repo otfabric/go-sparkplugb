@@ -138,8 +138,10 @@ applicable (broker or server requirement).
 |------------|--------|--------|-------|
 | Int8 in uint32 field | — | Y | The specification does not say how a negative value goes in: encoded sign-extended, decoded from either form ([INTEROPERABILITY.md](../INTEROPERABILITY.md#negative-int8-and-int16)) |
 | Int16 in uint32 field | — | Y | As Int8 |
-| Int32 in uint32 field, interpret as signed | — | Y | payload package |
+| Int32 in uint32 field, interpret as signed | — | Y | payload package; out of range is rejected ([INTEROPERABILITY.md](../INTEROPERABILITY.md#integers)) |
 | Int64 in uint64 field, interpret as signed | — | Y | payload package |
+| UInt8, UInt16, UInt32 in uint32 field | — | Y | payload package; out of range is rejected, also from `long_value` |
+| The same in DataSet cells, template parameters and property values | — | Y | payload package; `GetDataSetValues`, `GetTemplateParameterValue`, `GetPropertyValue` |
 
 ### Array Types
 

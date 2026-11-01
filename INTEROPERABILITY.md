@@ -15,7 +15,7 @@ normative requirements clause by clause.
 | Int8, Int16 encoded as | `int_value` sign-extended to 32 bits (as Eclipse Tahu and SparkplugNet) |
 | Int8, Int16 decoded from | either form: sign-extended or width-sized (as pysparkplug and srad send it). Anything else, such as `0x100` or `0xFFFFFF7F` for an Int8, is `ErrTypeMismatch` |
 | UInt32 encoded as | `int_value` (protobuf `uint32`, as the specification says) |
-| Integers decoded from | `int_value` or `long_value`, whichever carries the value (Eclipse Tahu puts UInt32 in `long_value`) |
+| Integers decoded from | `int_value` or `long_value`, whichever carries the value (Eclipse Tahu puts UInt32 in `long_value`). A value out of the datatype's range is `ErrTypeMismatch`, see [Integers](#integers) |
 | Datatype in NDATA, DDATA, NCMD, DCMD | as the caller builds the metric (`payload.NewMetric` sets it); a received metric without one takes the datatype of its birth |
 | `seq` in NCMD and DCMD | never sent |
 | Metric timestamp | on every metric of NBIRTH, DBIRTH, NDATA and DDATA |
@@ -39,9 +39,38 @@ go-sparkplugb follows Eclipse Tahu on encoding and accepts both on decoding:
 | `int16(-8)` | `0xFFFFFFF8` | `0xFFFFFFF8`, `0x0000FFF8` |
 
 `payload.GetValue` returns `ErrTypeMismatch` for any other value; it does not
-truncate. This covers metrics. DataSet values and template parameters of
-these types are passed through as the raw `uint32` (`GetDataSetValues` and
-`GetTemplateParameterValue`), so which form they have is the caller's.
+truncate. DataSet cells, template parameters and PropertyValues follow the
+same rule, and a template's members are metrics.
+
+### Integers
+
+Metric, DataSet.DataSetValue, Template.Parameter and PropertyValue carry
+integers in the same two unsigned fields, and the `payload` package treats them
+alike. What the specification states: the datatype's width and signedness, and
+the protobuf type (`uint32` up to 32 bits, `uint64` for Int64, UInt64 and
+DateTime). What it does not state: how a signed value goes in, or what a
+receiver does with a value out of range. The readings below are this library's.
+
+| Datatype | Read from `int_value` or `long_value` as | Anything else |
+|----------|------------------------------------------|---------------|
+| Int8, Int16 | the width-sized form, or the sign extension to 32 or 64 bits | `ErrTypeMismatch` |
+| Int32 | the 32-bit form, or its sign extension to 64 bits | `ErrTypeMismatch` |
+| Int64 | two's complement of all 64 bits; from `int_value`, zero-extended | none |
+| UInt8, UInt16, UInt32 | the value | above the type's maximum, `ErrTypeMismatch` |
+| UInt64 | the value | none |
+| DateTime | milliseconds since the epoch | above `math.MaxInt64`, which a `time.Time` cannot hold from milliseconds: `ErrTypeMismatch` |
+
+A value of another kind, a string in an Int8, is `ErrTypeMismatch` too. A metric
+or parameter with no value at all reads as zero, as before, and a DataSet cell
+with no value as `nil`.
+
+Encoding, in all four places: Int8, Int16 and Int32 in `int_value`,
+sign-extended to 32 bits; UInt8, UInt16 and UInt32 in `int_value`; Int64, UInt64
+and DateTime in `long_value`. The Go type has to be the datatype's, so nothing
+can be out of range, except a `time.Time` before the epoch, which `uint64` cannot
+hold (`ErrTypeMismatch`, also for DateTimeArray). `NewDataSet`,
+`NewTemplateParameter` and `NewPropertyValue` take the wire type as well, `uint32`
+or `uint64`: it is checked by the table above and written in the form above.
 
 ## Host and application behaviour
 
