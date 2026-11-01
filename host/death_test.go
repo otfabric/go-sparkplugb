@@ -3,6 +3,7 @@
 package host
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -82,5 +83,48 @@ func TestHostNDEATHMemoryLimits(t *testing.T) {
 	tr.deliverToAll(sessTopic(topic.NBIRTH, ""), sessMsg(0, 300, payload.BdSeqMetric(2)))
 	if !a.GetNode("g1", "n1").Online {
 		t.Error("NBIRTH ignored after the wait")
+	}
+}
+
+// The death the host ignored for its bdSeq is reported when that NBIRTH
+// arrives.
+func TestHostReportsDeathOnLateBirth(t *testing.T) {
+	tr := newMockTransport()
+	deaths := 0
+	cfg := testConfig()
+	cfg.OnNodeDeath = func(_, _ string) { deaths++ }
+	a, err := New(tr, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Connect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = a.Close(context.Background()) })
+	tr.deliverToAll(sessTopic(topic.NBIRTH, ""), sessMsg(0, 100, payload.BdSeqMetric(5)))
+
+	tr.deliverToAll(sessTopic(topic.NDEATH, ""), sessDeath(6))
+	tr.deliverToAll(sessTopic(topic.NBIRTH, ""), sessMsg(0, 200, payload.BdSeqMetric(6)))
+	tr.deliverToAll(sessTopic(topic.NBIRTH, ""), sessMsg(0, 201, payload.BdSeqMetric(6)))
+
+	if deaths != 1 {
+		t.Errorf("%d deaths reported, want 1", deaths)
+	}
+}
+
+// An NDEATH or NBIRTH without bdSeq says nothing about a session.
+func TestHostNoBdSeqIsNotLate(t *testing.T) {
+	a, tr := sessApp(t)
+	tr.deliverToAll(sessTopic(topic.NBIRTH, ""), sessMsg(0, 100, payload.BdSeqMetric(5)))
+	tr.deliverToAll(sessTopic(topic.NDEATH, ""), sessMsg(0, 0))
+	tr.deliverToAll(sessTopic(topic.NBIRTH, ""), sessMsg(0, 200, payload.BdSeqMetric(5)))
+	if !a.GetNode("g1", "n1").Online {
+		t.Error("NBIRTH dropped after an NDEATH without bdSeq")
+	}
+
+	tr.deliverToAll(sessTopic(topic.NDEATH, ""), sessDeath(5))
+	tr.deliverToAll(sessTopic(topic.NBIRTH, ""), sessMsg(0, 300))
+	if !a.GetNode("g1", "n1").Online {
+		t.Error("NBIRTH without bdSeq dropped")
 	}
 }
