@@ -1,5 +1,21 @@
 # go-sparkplugb Releases
 
+## v0.3.3
+
+**Date:** 2026-11-01
+**Previous release:** v0.3.2
+
+### Fixed
+
+- **`host` and `app` keep an update stamped in the millisecond of the NBIRTH that follows it.** Delivered before that NBIRTH, it was wiped with the state of the old session, and the value stayed stale until the next rebirth. Seen against srad on NanoMQ with delayed NBIRTHs.
+- **`edge` no longer publishes an NBIRTH after its NDEATH.** `Disconnect` kept the node online while it published the NDEATH, so a rebirth requested at that moment followed it and a host kept the node online. Seen with a Tahu host on EMQX. The session now ends first, and a message on its way goes out before the NDEATH; a publish after that returns `ErrNotConnected`. The state changes to `Disconnected` before the NDEATH is published.
+
+### Tests
+
+- A message in the millisecond of the next NBIRTH, for `host` and `app`; a rebirth during `Disconnect`, for `edge`.
+
+---
+
 ## v0.3.2
 
 **Date:** 2026-11-01
