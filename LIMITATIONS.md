@@ -50,3 +50,4 @@ stacks, are in [INTEROPERABILITY.md](INTEROPERABILITY.md#on-the-wire).
   `payload` package does not. Set its datatype from the definition first.
 - `GetQuality`, `bdSeq` and `seq` take the types the specification gives them;
   `host` and `app` read `bdSeq` from `long_value` only.
+- A session is told from another by payload timestamps, in milliseconds, of the edge node's clock. Two rebirths in the same millisecond, or an edge node that stamps a message earlier than the NBIRTH before it and has it reordered, cost a rebirth to recover. An NBIRTH that a broker delivers after the NDEATH of the same `bdSeq` cannot be told from a restart, so such a node stays online until its next death.

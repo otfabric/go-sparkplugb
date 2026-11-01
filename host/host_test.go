@@ -1353,7 +1353,10 @@ func TestHostAppliesNextSessionDBIRTHBeforeNBIRTH(t *testing.T) {
 
 	m, _ := payload.NewMetric("x", pb.DataType_Int32, int32(1))
 	enc := func(seq uint64, ms ...*pb.Payload_Metric) []byte {
-		b, _ := payload.Encode(payload.NewPayload(seq, ms...))
+		p := payload.NewPayload(seq, ms...)
+		ts := uint64(1000) // messages of a session: not in reverse of their publishing
+		p.Timestamp = &ts
+		b, _ := payload.Encode(p)
 		return b
 	}
 	tp := func(mt topic.MessageType, dev string) string {
@@ -1386,7 +1389,10 @@ func TestHostAppliesReorderedMessagesInSequence(t *testing.T) {
 	_ = app.Connect(context.Background())
 
 	enc := func(seq uint64, ms ...*pb.Payload_Metric) []byte {
-		b, _ := payload.Encode(payload.NewPayload(seq, ms...))
+		p := payload.NewPayload(seq, ms...)
+		ts := uint64(1000) // messages of a session: not in reverse of their publishing
+		p.Timestamp = &ts
+		b, _ := payload.Encode(p)
 		return b
 	}
 	x := func(v int32) *pb.Payload_Metric { m, _ := payload.NewMetric("x", pb.DataType_Int32, v); return m }

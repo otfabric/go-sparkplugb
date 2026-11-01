@@ -106,6 +106,9 @@ type App struct {
 	rebirthAsked  map[string]time.Time   // nodeKey -> last rebirth request the host made itself
 	rebirthMissed map[string]bool        // nodeKey -> a request was throttled while one was pending
 	held          map[string][]heldMsg   // nodeKey -> messages ahead of their sequence
+	sessions      map[string]*session    // nodeKey -> current session
+	sessionTimers map[string]*time.Timer // nodeKey -> pending wait for an NBIRTH
+	sessionWait   time.Duration          // sessionWait, shorter in tests
 }
 
 func New(transport mqtt.Transport, cfg Config) (*App, error) {
@@ -132,6 +135,7 @@ func New(transport mqtt.Transport, cfg Config) (*App, error) {
 		nodes:         make(map[string]*EdgeNodeState),
 		closeCh:       make(chan struct{}),
 		reorderTimers: make(map[string]*time.Timer),
+		sessionWait:   sessionWait,
 	}, nil
 }
 
@@ -204,6 +208,7 @@ func (a *App) Disconnect(ctx context.Context) error {
 		t.Stop()
 		delete(a.reorderTimers, k)
 	}
+	a.stopSessionTimers()
 	a.mu.Unlock()
 
 	ts := time.Now().UnixMilli()
@@ -345,6 +350,7 @@ func (a *App) onConnectionLost(err error) {
 		t.Stop()
 		delete(a.reorderTimers, k)
 	}
+	a.stopSessionTimers()
 	a.setState(Disconnected)
 }
 
@@ -411,8 +417,31 @@ type heldMsg struct {
 	t           topic.Topic
 	seq         uint64
 	data        []byte
+	ts          uint64 // payload timestamp
 	at          time.Time
 	nextSession bool
+}
+
+// session is the current session of an edge node, as far as its NBIRTH tells:
+// messages carry no session number but bdSeq in the births and deaths.
+type session struct {
+	birthTS uint64    // payload timestamp of the NBIRTH
+	bornAt  time.Time // when the NBIRTH arrived
+	applied []heldMsg // the last messages applied to this session
+}
+
+// maxApplied is how many applied messages a session keeps, for the next
+// NBIRTH to take back what was its own (see handleNBIRTH).
+const maxApplied = 32
+
+func (s *session) remember(m heldMsg) {
+	if s == nil {
+		return
+	}
+	if len(s.applied) == maxApplied {
+		s.applied = append(s.applied[:0], s.applied[1:]...)
+	}
+	s.applied = append(s.applied, m)
 }
 
 // hold keeps a message that cannot be applied yet: one from an edge node
@@ -423,14 +452,20 @@ type heldMsg struct {
 // as for a message that is lost. A message behind the expected sequence
 // number is held for the next session: a restarted node starts again at 0,
 // and its DBIRTH may arrive before its NBIRTH. It is applied after that
-// NBIRTH, and requests no rebirth: when the NBIRTH does not come, it was a
-// late message of the current session.
+// NBIRTH. When that NBIRTH does not come, a rebirth is requested (see
+// expectSession): either the message is lost, or the host is ahead of the
+// edge node and would otherwise hold everything it sends.
+//
+// A message published before the current NBIRTH, out of sequence, belongs to
+// a session that has ended (see superseded). It is dropped: applied to this
+// session it would take the place of a message of this session, or carry
+// the sequence number past the edge node's.
 func (a *App) hold(t topic.Topic, data []byte) bool {
 	p, err := payload.Decode(data)
 	if err != nil {
 		return false // the handler reports it
 	}
-	seq := p.GetSeq()
+	seq, ts := p.GetSeq(), p.GetTimestamp()
 	key := nodeKey(t.GroupID, t.EdgeNodeID)
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -439,7 +474,13 @@ func (a *App) hold(t topic.Topic, data []byte) bool {
 	if ns != nil {
 		expected := (ns.LastSeq + 1) % 256
 		if seq == expected {
+			a.sessions[key].remember(heldMsg{t: t, seq: seq, data: data, ts: ts})
 			return false
+		}
+		if a.superseded(key, ts) {
+			a.cfg.Logger.Debugf("%s/%s: dropped %s, seq %d: published before the NBIRTH",
+				t.GroupID, t.EdgeNodeID, t.Type, seq)
+			return true
 		}
 		behind = (seq-expected+256)%256 > 128
 	}
@@ -449,9 +490,10 @@ func (a *App) hold(t topic.Topic, data []byte) bool {
 	if len(a.held[key]) >= maxHeld {
 		return false
 	}
-	a.held[key] = append(a.held[key], heldMsg{t: t, seq: seq, data: data, at: time.Now(), nextSession: behind})
+	a.held[key] = append(a.held[key], heldMsg{t: t, seq: seq, data: data, ts: ts, at: time.Now(), nextSession: behind})
 	switch {
 	case behind:
+		a.expectSession(t)
 	case ns == nil:
 		a.unknownNode(t)
 	default:
@@ -462,6 +504,48 @@ func (a *App) hold(t topic.Topic, data []byte) bool {
 
 // heldMaxAge is how long a held message may wait for the gap before it.
 const heldMaxAge = 30 * time.Second
+
+// superseded reports whether a message with payload timestamp ts was
+// published before the NBIRTH of the edge node's current session, so by an
+// earlier session: Sparkplug has the timestamp be the time of publishing, and
+// the edge node's clock stamps both. Only for heldMaxAge after the NBIRTH: a
+// late message is late by that much at most, and an edge node whose clock
+// goes back must not lose messages for longer. A message without a timestamp
+// is not judged. Called with a.mu held.
+func (a *App) superseded(key string, ts uint64) bool {
+	s, ok := a.sessions[key]
+	return ok && ts != 0 && ts < s.birthTS && time.Since(s.bornAt) <= heldMaxAge
+}
+
+// expectSession gives the NBIRTH that a message behind the expected sequence
+// number announces time to arrive, and requests a rebirth when it does not.
+// Called with a.mu held.
+func (a *App) expectSession(t topic.Topic) {
+	key := nodeKey(t.GroupID, t.EdgeNodeID)
+	if _, pending := a.sessionTimers[key]; pending {
+		return
+	}
+	if a.sessionTimers == nil {
+		a.sessionTimers = make(map[string]*time.Timer)
+	}
+	a.sessionTimers[key] = time.AfterFunc(a.sessionWait, func() {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		if _, pending := a.sessionTimers[key]; !pending {
+			return
+		}
+		delete(a.sessionTimers, key)
+		a.askRebirth(t, "message behind the sequence, no NBIRTH followed")
+	})
+}
+
+// stopSessionTimers ends every wait for a NBIRTH. Called with a.mu held.
+func (a *App) stopSessionTimers() {
+	for k, t := range a.sessionTimers {
+		t.Stop()
+		delete(a.sessionTimers, k)
+	}
+}
 
 // drain applies the held messages of the edge node that are next in
 // sequence, one after the other, and drops those that waited too long.
@@ -481,15 +565,29 @@ func (a *App) drain(t topic.Topic) {
 			found bool
 		)
 		for i := range held {
+			if !held[i].nextSession && held[i].seq == expected && (next == nil || held[i].ts >= next.ts) {
+				next, found = &held[i], true // the latest of a seq sent twice
+			}
+		}
+		for i := range held {
 			switch {
-			case !found && !held[i].nextSession && held[i].seq == expected:
-				next, found = &held[i], true
+			case &held[i] == next:
 			case time.Since(held[i].at) > heldMaxAge:
 			default:
 				kept = append(kept, held[i])
 			}
 		}
 		a.held[key] = kept
+		if found {
+			a.sessions[key].remember(*next)
+		} else {
+			for i := range kept {
+				if !kept[i].nextSession && (kept[i].seq-expected+256)%256 > 128 {
+					a.expectSession(t) // two sessions shared this seq
+					break
+				}
+			}
+		}
 		a.mu.Unlock()
 		if !found {
 			return
@@ -528,9 +626,45 @@ func (a *App) handleNBIRTH(t topic.Topic, data []byte) {
 		}
 	}
 	a.nodes[key] = ns
+	if a.sessions == nil {
+		a.sessions = make(map[string]*session)
+	}
+	birthTS := p.GetTimestamp()
+	if prev := a.sessions[key]; prev != nil && birthTS != 0 {
+		// A message newer than this NBIRTH that the broker delivered before
+		// it, whose seq happened to be the next of the session that just
+		// ended, is of this session: the state it went into is gone. So is a
+		// DBIRTH of the same millisecond, which an edge node's births share.
+		var ours []heldMsg
+		for _, m := range prev.applied {
+			if m.ts > birthTS || m.ts == birthTS && m.t.Type == topic.DBIRTH {
+				m.at = time.Now()
+				ours = append(ours, m)
+			}
+		}
+		if len(ours) > 0 {
+			if a.held == nil {
+				a.held = make(map[string][]heldMsg)
+			}
+			a.held[key] = append(ours, a.held[key]...) // on a tie, drain takes the held one
+		}
+	}
+	a.sessions[key] = &session{birthTS: birthTS, bornAt: time.Now()}
 	a.answeredRebirth(t)
-	for i := range a.held[key] {
-		a.held[key][i].nextSession = false // this NBIRTH starts their session
+	if timer, ok := a.sessionTimers[key]; ok {
+		timer.Stop()
+		delete(a.sessionTimers, key)
+	}
+	if held := a.held[key]; len(held) > 0 {
+		kept := make([]heldMsg, 0, len(held))
+		for _, m := range held {
+			if a.superseded(key, m.ts) {
+				continue // of a session that has ended
+			}
+			m.nextSession = false // this NBIRTH starts their session
+			kept = append(kept, m)
+		}
+		a.held[key] = kept
 	}
 	if timer, ok := a.reorderTimers[key]; ok {
 		timer.Stop()
@@ -832,6 +966,12 @@ func cloneMetrics(in map[string]*pb.Payload_Metric) map[string]*pb.Payload_Metri
 // of sequence; one request each would make the node publish one NBIRTH
 // each, a rebirth storm.
 const rebirthInterval = 2 * time.Second
+
+// sessionWait is how long a message behind the expected sequence number
+// waits for an NBIRTH before a rebirth is requested. Reordering across topics
+// is a matter of milliseconds: the wait only has to be longer than that, and
+// short enough that the host does not sit on a stale view.
+const sessionWait = 2 * time.Second
 
 // unknownNode requests a rebirth from an edge node that sent a message
 // before any NBIRTH was seen: a host joining while the node is online, or an
