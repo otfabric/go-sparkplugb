@@ -1,5 +1,34 @@
 # go-sparkplugb Releases
 
+## v0.3.0
+
+**Date:** 2026-11-01
+**Previous release:** v0.2.3
+
+### Changed
+
+- **`GetDataSetValues` and `GetTemplateParameterValue` return the Go type of the datatype, an API change.** An Int8 cell or parameter is an `int8`, not the raw `uint32`; Int64 an `int64`, not a `uint64`; the rest as `GetValue` returns them. A DateTime cell is a `time.Time`, not a `uint64`. Code with type assertions on `uint32` or `uint64` for those datatypes has to change. It compiles unchanged, and fails at run time.
+- **Every integer out of its datatype's range is rejected, a behaviour change.** Metrics (`GetValue`), DataSet cells, template parameters and properties return `ErrTypeMismatch` for a UInt8 above 255, a UInt16 above 65535, a UInt32 or Int32 that does not fit in `long_value`, a DateTime above `math.MaxInt64` milliseconds and an Int8 or Int16 in neither wire form, and for an integer metric whose value is of another kind. Until now they were truncated, or read as 0. A peer that sends such values now gets an error from `GetValue`. Valid values decode as before.
+- **`NewDataSet` and `NewTemplateParameter` take the Go type of the datatype** (`int8(-8)` for an Int8). The raw `uint32` and `uint64` still work, but they have to be values of the datatype, which fails for a value out of range that was written before, and they go out in the canonical form: a width-sized Int8 is sign-extended.
+- **`SetValue` refuses a `time.Time` before 1970 for DateTime and DateTimeArray,** which wrapped around to a date far in the future. `ErrTypeMismatch`.
+- `GetDataSetValues` returns `ErrColumnMismatch` for a row with more cells than the DataSet has types.
+- `GetQuality` reads the property as an Int32 and returns false for a value that is not one.
+
+### Added
+
+- `NewPropertyValue` and `GetPropertyValue`, with the same rules, for a metric's PropertySet.
+- DateTime in DataSet columns and template parameters, which `NewDataSet` and `NewTemplateParameter` refused.
+
+### Documentation
+
+- `INTEROPERABILITY.md`, section Integers: what the specification states, and what is this library's reading.
+
+### Tests
+
+- `FuzzIntegerPaths` holds the metric, DataSet cell, template parameter and PropertyValue paths to one statement of the rule. Table tests per path.
+
+---
+
 ## v0.2.3
 
 **Date:** 2026-10-31

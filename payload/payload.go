@@ -91,6 +91,9 @@ func SetQuality(m *pb.Payload_Metric, quality int32) {
 	m.Properties.Values = append(m.Properties.Values, prop)
 }
 
+// GetQuality returns the "quality" property of m. The value of a property is
+// Int32 (tck-id-payloads-propertyset-quality-value-type); one that is not returns
+// false.
 func GetQuality(m *pb.Payload_Metric) (int32, bool) {
 	if m.Properties == nil {
 		return 0, false
@@ -98,7 +101,11 @@ func GetQuality(m *pb.Payload_Metric) (int32, bool) {
 	for i, k := range m.Properties.Keys {
 		if k == "quality" {
 			if i < len(m.Properties.Values) {
-				return int32(m.Properties.Values[i].GetIntValue()), true
+				v, err := propertyInteger(pb.DataType_Int32, m.Properties.Values[i])
+				if err != nil {
+					return 0, false
+				}
+				return v.(int32), true
 			}
 		}
 	}

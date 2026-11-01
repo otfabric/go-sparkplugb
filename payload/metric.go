@@ -78,30 +78,14 @@ func GetValue(m *pb.Payload_Metric) (any, error) {
 
 	dt := pb.DataType(m.GetDatatype())
 	switch dt {
-	case pb.DataType_Int8:
-		v, err := signedInt(integer(m), 8)
+	case pb.DataType_Int8, pb.DataType_Int16, pb.DataType_Int32, pb.DataType_Int64,
+		pb.DataType_UInt8, pb.DataType_UInt16, pb.DataType_UInt32, pb.DataType_UInt64,
+		pb.DataType_DateTime:
+		v, err := integer(m)
 		if err != nil {
 			return nil, err
 		}
-		return int8(v), nil
-	case pb.DataType_Int16:
-		v, err := signedInt(integer(m), 16)
-		if err != nil {
-			return nil, err
-		}
-		return int16(v), nil
-	case pb.DataType_Int32:
-		return int32(integer(m)), nil
-	case pb.DataType_Int64:
-		return int64(integer(m)), nil
-	case pb.DataType_UInt8:
-		return uint8(integer(m)), nil
-	case pb.DataType_UInt16:
-		return uint16(integer(m)), nil
-	case pb.DataType_UInt32:
-		return uint32(integer(m)), nil
-	case pb.DataType_UInt64:
-		return integer(m), nil
+		return decodeInteger(dt, v)
 	case pb.DataType_Float:
 		return m.GetFloatValue(), nil
 	case pb.DataType_Double:
@@ -113,9 +97,6 @@ func GetValue(m *pb.Payload_Metric) (any, error) {
 			return nil, ErrStringTooLarge
 		}
 		return m.GetStringValue(), nil
-	case pb.DataType_DateTime:
-		ms := integer(m)
-		return time.UnixMilli(int64(ms)).UTC(), nil
 	case pb.DataType_Bytes, pb.DataType_File:
 		return m.GetBytesValue(), nil
 	case pb.DataType_DataSet:
@@ -161,27 +142,17 @@ func GetValue(m *pb.Payload_Metric) (any, error) {
 
 // integer returns an integer metric value from whichever of int_value and
 // long_value carries it. Sparkplug puts 8- to 32-bit types in int_value, but
-// Eclipse Tahu (Java and JavaScript) encodes UInt32 in long_value.
-func integer(m *pb.Payload_Metric) uint64 {
-	if v, ok := m.GetValue().(*pb.Payload_Metric_LongValue); ok {
-		return v.LongValue
-	}
-	return uint64(m.GetIntValue())
-}
-
-// signedInt decodes an Int8 or Int16 of the given width from its wire value.
-// Sparkplug carries both in an unsigned field and does not say how a negative
-// value goes in: Eclipse Tahu sign-extends it (int8(-8) is 0xFFFFFFF8),
-// pysparkplug and srad send the width (0xF8). Both are accepted; SetValue
-// sign-extends. A value that is neither is not an integer of that width, and
-// returns ErrTypeMismatch rather than being truncated. See INTEROPERABILITY.md.
-func signedInt(v uint64, bits uint) (int64, error) {
-	shift := 64 - bits
-	s := int64(v<<shift) >> shift
-	// The width-sized form, the 32-bit sign extension of int_value, and the
-	// 64-bit one, which long_value can carry.
-	if v < 1<<bits || v == uint64(uint32(s)) || v == uint64(s) {
-		return s, nil
+// Eclipse Tahu (Java and JavaScript) encodes UInt32 in long_value. A metric
+// without a value reads as zero; one whose value is another kind has no integer
+// and returns ErrTypeMismatch.
+func integer(m *pb.Payload_Metric) (uint64, error) {
+	switch v := m.GetValue().(type) {
+	case nil:
+		return 0, nil
+	case *pb.Payload_Metric_IntValue:
+		return uint64(v.IntValue), nil
+	case *pb.Payload_Metric_LongValue:
+		return v.LongValue, nil
 	}
 	return 0, ErrTypeMismatch
 }
@@ -202,56 +173,18 @@ func SetValue(m *pb.Payload_Metric, dt pb.DataType, v any) error {
 	m.IsNull = &f
 
 	switch dt {
-	case pb.DataType_Int8:
-		val, ok := v.(int8)
-		if !ok {
-			return ErrTypeMismatch
+	case pb.DataType_Int8, pb.DataType_Int16, pb.DataType_Int32, pb.DataType_Int64,
+		pb.DataType_UInt8, pb.DataType_UInt16, pb.DataType_UInt32, pb.DataType_UInt64,
+		pb.DataType_DateTime:
+		u, err := encodeInteger(dt, v)
+		if err != nil {
+			return err
 		}
-		u := uint32(int32(val))
-		m.Value = &pb.Payload_Metric_IntValue{IntValue: u}
-	case pb.DataType_Int16:
-		val, ok := v.(int16)
-		if !ok {
-			return ErrTypeMismatch
+		if usesLongValue(dt) {
+			m.Value = &pb.Payload_Metric_LongValue{LongValue: u}
+		} else {
+			m.Value = &pb.Payload_Metric_IntValue{IntValue: uint32(u)}
 		}
-		u := uint32(int32(val))
-		m.Value = &pb.Payload_Metric_IntValue{IntValue: u}
-	case pb.DataType_Int32:
-		val, ok := v.(int32)
-		if !ok {
-			return ErrTypeMismatch
-		}
-		m.Value = &pb.Payload_Metric_IntValue{IntValue: uint32(val)}
-	case pb.DataType_Int64:
-		val, ok := v.(int64)
-		if !ok {
-			return ErrTypeMismatch
-		}
-		m.Value = &pb.Payload_Metric_LongValue{LongValue: uint64(val)}
-	case pb.DataType_UInt8:
-		val, ok := v.(uint8)
-		if !ok {
-			return ErrTypeMismatch
-		}
-		m.Value = &pb.Payload_Metric_IntValue{IntValue: uint32(val)}
-	case pb.DataType_UInt16:
-		val, ok := v.(uint16)
-		if !ok {
-			return ErrTypeMismatch
-		}
-		m.Value = &pb.Payload_Metric_IntValue{IntValue: uint32(val)}
-	case pb.DataType_UInt32:
-		val, ok := v.(uint32)
-		if !ok {
-			return ErrTypeMismatch
-		}
-		m.Value = &pb.Payload_Metric_IntValue{IntValue: val}
-	case pb.DataType_UInt64:
-		val, ok := v.(uint64)
-		if !ok {
-			return ErrTypeMismatch
-		}
-		m.Value = &pb.Payload_Metric_LongValue{LongValue: val}
 	case pb.DataType_Float:
 		val, ok := v.(float32)
 		if !ok {
@@ -276,13 +209,6 @@ func SetValue(m *pb.Payload_Metric, dt pb.DataType, v any) error {
 			return ErrTypeMismatch
 		}
 		m.Value = &pb.Payload_Metric_StringValue{StringValue: val}
-	case pb.DataType_DateTime:
-		val, ok := v.(time.Time)
-		if !ok {
-			return ErrTypeMismatch
-		}
-		ms := uint64(val.UnixMilli())
-		m.Value = &pb.Payload_Metric_LongValue{LongValue: ms}
 	case pb.DataType_Bytes, pb.DataType_File:
 		val, ok := v.([]byte)
 		if !ok {
@@ -382,7 +308,11 @@ func SetValue(m *pb.Payload_Metric, dt pb.DataType, v any) error {
 		if !ok {
 			return ErrTypeMismatch
 		}
-		m.Value = &pb.Payload_Metric_BytesValue{BytesValue: encodeDateTimeArray(val)}
+		b, err := encodeDateTimeArray(val)
+		if err != nil {
+			return err
+		}
+		m.Value = &pb.Payload_Metric_BytesValue{BytesValue: b}
 
 	default:
 		return ErrUnknownType
@@ -647,16 +577,23 @@ func decodeDateTimeArray(b []byte) ([]time.Time, error) {
 	}
 	out := make([]time.Time, len(b)/8)
 	for i := range out {
-		ms := binary.LittleEndian.Uint64(b[i*8:])
-		out[i] = time.UnixMilli(int64(ms)).UTC()
+		t, err := dateTime(binary.LittleEndian.Uint64(b[i*8:]))
+		if err != nil {
+			return nil, err
+		}
+		out[i] = t
 	}
 	return out, nil
 }
 
-func encodeDateTimeArray(v []time.Time) []byte {
+func encodeDateTimeArray(v []time.Time) ([]byte, error) {
 	out := make([]byte, len(v)*8)
 	for i, t := range v {
-		binary.LittleEndian.PutUint64(out[i*8:], uint64(t.UnixMilli()))
+		ms, err := dateTimeMillis(t)
+		if err != nil {
+			return nil, err
+		}
+		binary.LittleEndian.PutUint64(out[i*8:], ms)
 	}
-	return out
+	return out, nil
 }
