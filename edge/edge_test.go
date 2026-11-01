@@ -1603,3 +1603,22 @@ func TestNoBirthAfterNDEATH(t *testing.T) {
 		t.Errorf("last published %s, want the NDEATH", last.Topic)
 	}
 }
+
+// A message that was on its way when the session ended does not go out.
+func TestPublishAfterSessionEnded(t *testing.T) {
+	tr := newMockTransport()
+	n, err := New(tr, testConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := n.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.Disconnect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.publish(ctx, topic.NDATA, "", payload.NewPayload(1)); !errors.Is(err, ErrNotConnected) {
+		t.Errorf("publish: %v, want ErrNotConnected", err)
+	}
+}
