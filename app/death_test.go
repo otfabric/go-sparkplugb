@@ -54,9 +54,10 @@ func TestApplicationWillBeforeItsNBIRTH(t *testing.T) {
 }
 
 // An edge node that restarts with the bdSeq of its NDEATH looks like a late
-// NBIRTH: it comes online on the rebirth that follows.
+// NBIRTH: within the wait, it comes online on the rebirth that follows.
 func TestApplicationRestartWithSameBdSeqComesOnline(t *testing.T) {
 	a, tr := sessApp(t)
+	a.sessionWait, a.lateBirthWait = 100*time.Millisecond, 100*time.Millisecond
 	tr.deliver(sessTopic(topic.NBIRTH, ""), sessMsg(0, 100, payload.BdSeqMetric(0)))
 	tr.deliver(sessTopic(topic.NDEATH, ""), sessDeath(0))
 	tr.deliver(sessTopic(topic.NBIRTH, ""), sessMsg(0, 200, payload.BdSeqMetric(0)))
@@ -68,7 +69,7 @@ func TestApplicationRestartWithSameBdSeqComesOnline(t *testing.T) {
 	}
 }
 
-// After the wait a NBIRTH counts again, and one with another bdSeq always does.
+// After lateBirthWait an NBIRTH counts again, and one with another bdSeq always does.
 func TestApplicationNDEATHMemoryLimits(t *testing.T) {
 	a, tr := sessApp(t)
 	tr.deliver(sessTopic(topic.NBIRTH, ""), sessMsg(0, 100, payload.BdSeqMetric(1)))
@@ -79,7 +80,8 @@ func TestApplicationNDEATHMemoryLimits(t *testing.T) {
 	}
 
 	tr.deliver(sessTopic(topic.NDEATH, ""), sessDeath(2))
-	time.Sleep(2 * a.sessionWait)
+	a.lateBirthWait = time.Millisecond
+	time.Sleep(5 * time.Millisecond)
 	tr.deliver(sessTopic(topic.NBIRTH, ""), sessMsg(0, 300, payload.BdSeqMetric(2)))
 	if !a.GetNode("g1", "n1").Online {
 		t.Error("NBIRTH ignored after the wait")

@@ -111,6 +111,7 @@ type Application struct {
 	sessions      map[string]*session    // nodeKey -> current session
 	sessionTimers map[string]*time.Timer // nodeKey -> pending wait for an NBIRTH
 	sessionWait   time.Duration          // sessionWait, shorter in tests
+	lateBirthWait time.Duration          // lateBirthWait, shorter in tests
 }
 
 func New(transport mqtt.Transport, cfg Config) (*Application, error) {
@@ -134,7 +135,8 @@ func New(transport mqtt.Transport, cfg Config) (*Application, error) {
 		nodes:     make(map[string]*EdgeNodeState),
 		closeCh:   make(chan struct{}),
 
-		sessionWait: sessionWait,
+		sessionWait:   sessionWait,
+		lateBirthWait: lateBirthWait,
 	}, nil
 }
 
@@ -560,6 +562,10 @@ func (a *Application) drain(t topic.Topic) {
 	}
 }
 
+// lateBirthWait is how long after an NDEATH an NBIRTH with its bdSeq is taken
+// for one the broker delivered late (see lateBirth).
+const lateBirthWait = 250 * time.Millisecond
+
 // death is the last NDEATH of an edge node.
 type death struct {
 	bdSeq uint64
@@ -580,9 +586,10 @@ func bdSeqOf(p *pb.Payload) (uint64, bool) {
 // a will ahead of a rebirth that was in flight when the edge node died; that
 // NBIRTH must not bring a dead node back online. A message carries no proof
 // of being late, and an edge node that restarts with the bdSeq of its NDEATH
-// looks the same (srad starts at 0), so for sessionWait after the NDEATH such
-// an NBIRTH is dropped and a rebirth is requested after that: a live edge node
-// answers it, and comes online then. died reports that the node went offline
+// looks the same (srad and SparkplugNet start at 0), so only the time tells:
+// a late NBIRTH follows within milliseconds, a restart takes longer. Within
+// lateBirthWait of the NDEATH such an NBIRTH is dropped and a rebirth is
+// requested after sessionWait, for an edge node that was that fast. died reports that the node went offline
 // here: its NDEATH had a bdSeq ahead of the session the host knew, and was
 // ignored until this NBIRTH matched it. Called with a.mu held.
 func (a *Application) lateBirth(t topic.Topic, p *pb.Payload) (late, died bool) {
@@ -591,7 +598,7 @@ func (a *Application) lateBirth(t topic.Topic, p *pb.Payload) (late, died bool) 
 	if !ok {
 		return false, false
 	}
-	if bd, has := bdSeqOf(p); !has || bd != d.bdSeq || time.Since(d.at) > a.sessionWait {
+	if bd, has := bdSeqOf(p); !has || bd != d.bdSeq || time.Since(d.at) > a.lateBirthWait {
 		delete(a.deaths, key)
 		return false, false
 	}

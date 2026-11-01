@@ -7,15 +7,15 @@
 
 ### Fixed
 
-- **An NBIRTH delivered just after the NDEATH of the same `bdSeq` no longer brings a dead edge node back online.** MQTT orders messages per topic only, so a will can overtake a rebirth that was in flight when the edge node died; `host` and `app` then showed the node online for good. For 2 seconds after an NDEATH, an NBIRTH with its `bdSeq` is dropped, and a rebirth is then requested. A node whose NDEATH had a `bdSeq` ahead of the known session goes offline on that NBIRTH. A DBIRTH on an offline node no longer puts the device online.
+- **An NBIRTH delivered just after the NDEATH of the same `bdSeq` no longer brings a dead edge node back online.** MQTT orders messages per topic only, so a will can overtake a rebirth that was in flight when the edge node died; `host` and `app` then showed the node online for good. For 250 ms after an NDEATH, an NBIRTH with its `bdSeq` is dropped, and a rebirth is requested 2 seconds later. A node whose NDEATH had a `bdSeq` ahead of the known session goes offline on that NBIRTH. A DBIRTH on an offline node no longer puts the device online.
 
 ### Changed
 
-- An edge node that restarts with the `bdSeq` of its NDEATH within 2 seconds, as srad does when it starts again at 0, comes online on the rebirth that follows, up to about 2 seconds later than before.
+- An edge node that restarts within 250 ms with the `bdSeq` of its NDEATH comes online only on the rebirth that follows, about 2 seconds later. srad and SparkplugNet start again at `bdSeq` 0, and SparkplugNet does not answer that rebirth.
 
 ### Tests
 
-- `host` and `app`: late NBIRTHs after an NDEATH, a will before its NBIRTH, a restart with the same `bdSeq`, and the limits of the 2 seconds.
+- `host` and `app`: late NBIRTHs after an NDEATH, a will before its NBIRTH, a restart with the same `bdSeq`, and the limits of the 250 ms.
 
 ---
 
