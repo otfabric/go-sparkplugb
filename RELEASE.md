@@ -1,5 +1,20 @@
 # go-sparkplugb Releases
 
+## v0.3.3
+
+**Date:** 2026-11-01
+**Previous release:** v0.3.2
+
+### Fixed
+
+- **`host` and `app` keep an update stamped in the millisecond of the NBIRTH that follows it.** Delivered before that NBIRTH, it was wiped with the state of the old session, and the value stayed stale until the next rebirth. Seen against srad on NanoMQ with delayed NBIRTHs.
+
+### Tests
+
+- A message in the millisecond of the next NBIRTH, for `host` and `app`.
+
+---
+
 ## v0.3.2
 
 **Date:** 2026-11-01

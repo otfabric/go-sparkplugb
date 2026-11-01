@@ -98,6 +98,22 @@ func TestHostDropsHeldMessageOfEndedSession(t *testing.T) {
 	}
 }
 
+// srad stamped an update in the millisecond of a rebirth's NBIRTH, which the
+// broker delivered after the update: the NBIRTH wiped it.
+func TestHostTakesBackMessageOfBirthMillisecond(t *testing.T) {
+	a, tr := sessApp(t)
+	tr.deliverToAll(sessTopic(topic.NBIRTH, ""), sessMsg(0, 100, payload.BdSeqMetric(0), sessInt(t, "x", 1)))
+	tr.deliverToAll(sessTopic(topic.NDATA, ""), sessMsg(1, 200, sessInt(t, "x", 2)))
+
+	tr.deliverToAll(sessTopic(topic.NBIRTH, ""), sessMsg(0, 200, payload.BdSeqMetric(0), sessInt(t, "x", 1)))
+	tr.deliverToAll(sessTopic(topic.NDATA, ""), sessMsg(1, 201, sessInt(t, "y", 3)))
+
+	ns := a.GetNode("g1", "n1")
+	if v := sessValue(t, ns.Metrics, "x"); v != int32(2) {
+		t.Errorf("x = %v, want 2", v)
+	}
+}
+
 // Data of the ended session that was waiting for its gap carried the sequence
 // number past the edge node's: all that followed was then behind, and held
 // for an NBIRTH that never came. The host stayed frozen.

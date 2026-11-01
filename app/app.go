@@ -668,10 +668,12 @@ func (a *Application) handleNBIRTH(t topic.Topic, data []byte) {
 		// A message newer than this NBIRTH that the broker delivered before
 		// it, whose seq happened to be the next of the session that just
 		// ended, is of this session: the state it went into is gone. So is a
-		// DBIRTH of the same millisecond, which an edge node's births share.
+		// message of the same millisecond: an edge node's births share it, and
+		// data can follow them that fast. Had it come before this NBIRTH, its
+		// value is in the NBIRTH and its seq does not follow it.
 		var ours []heldMsg
 		for _, m := range prev.applied {
-			if m.ts > birthTS || m.ts == birthTS && m.t.Type == topic.DBIRTH {
+			if m.ts >= birthTS {
 				m.at = time.Now()
 				ours = append(ours, m)
 			}
