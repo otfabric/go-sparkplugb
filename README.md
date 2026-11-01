@@ -105,7 +105,7 @@ with the raw protobuf types.
 
 Every role of go-sparkplugb runs on every push against the six reference
 stacks of
-[sparkplugb-interop v0.1.0](https://github.com/otfabric/sparkplugb-interop/releases/tag/v0.1.0),
+[sparkplugb-interop v0.3.0](https://github.com/otfabric/sparkplugb-interop/releases/tag/v0.3.0),
 on four MQTT brokers, with the images pinned by digest in
 [interop/images.go](interop/images.go).
 

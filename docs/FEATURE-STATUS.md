@@ -8,7 +8,8 @@ Levels: **implemented**, **tested** (this repository), **independently verified*
 | Host Application: STATE, session tracking, commands, reordering | independently verified | same |
 | Application without STATE | independently verified | same |
 | Scalar metric codecs | independently verified | same |
-| Templates, DataSets, arrays, properties | tested | `payload` tests only ([LIMITATIONS.md](../LIMITATIONS.md#verification)) |
+| Templates, DataSets, properties | independently verified, with integers | `composite` fixture, [INTEROPERABILITY.md](../INTEROPERABILITY.md#verification-status) |
+| Arrays | tested | `payload` tests only ([LIMITATIONS.md](../LIMITATIONS.md#verification)) |
 | Server walking, primary host awareness | tested | `edge/edge_test.go` |
 | TLS, WebSocket through Paho | implemented | `mqtt/paho.go`; the login and interop tests use plain TCP |
 | Broker login (`Username`, `Password`) | tested | `mqtt/e2e_test.go`, fake broker only |

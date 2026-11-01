@@ -19,6 +19,10 @@
 - `NewPropertyValue` and `GetPropertyValue`, with the same rules, for a metric's PropertySet.
 - DateTime in DataSet columns and template parameters, which `NewDataSet` and `NewTemplateParameter` refused.
 
+### Interoperability
+
+- **The interop suite pins sparkplugb-interop v0.3.0,** which it had at v0.1.0. It runs the third update of `scalars` and the new `composite` fixture: DataSets, templates and properties against Tahu, tahu-js and SparkplugNet edges and Tahu, SparkplugNet and sparkplughost hosts, with the form of each Int8 and Int16 checked on the wire. Exclusions and the two SparkplugNet findings are in `INTEROPERABILITY.md`.
+
 ### Documentation
 
 - `INTEROPERABILITY.md`, section Integers: what the specification states, and what is this library's reading.

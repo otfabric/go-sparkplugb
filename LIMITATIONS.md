@@ -20,11 +20,13 @@ evidence in [INTEROPERABILITY.md](INTEROPERABILITY.md).
 
 - Run against six independent implementations (Eclipse Tahu Java and JavaScript,
   pysparkplug, SparkplugNet, srad, sparkplughost) through
-  [sparkplugb-interop](https://github.com/otfabric/sparkplugb-interop) v0.1.0,
+  [sparkplugb-interop](https://github.com/otfabric/sparkplugb-interop) v0.3.0,
   on Mosquitto, HiveMQ CE, EMQX and NanoMQ. Roles, exclusions and upstream
   defects are in [INTEROPERABILITY.md](INTEROPERABILITY.md#verification-status).
-- Templates, DataSets, arrays and properties are covered by this repository's
-  codec tests only: no fixture of the reference images has them.
+- Arrays are covered by this repository's codec tests only: no fixture of the
+  reference images has them. DataSets, templates and properties are run with
+  integers, against Tahu, tahu-js and SparkplugNet edges and Tahu, SparkplugNet and
+  sparkplughost hosts; pysparkplug and srad do not run them.
 - Not run against the Sparkplug TCK, or against commercial implementations.
 - Certification: none. Eclipse Sparkplug compatibility certification has not been attempted.
 
@@ -43,5 +45,8 @@ stacks, are in [INTEROPERABILITY.md](INTEROPERABILITY.md#on-the-wire).
   what this library refuses.
 - An Int64 or UInt64 in `int_value`, against the specification's `uint64`, is read
   zero-extended: a negative Int64 sent that way reads as a large positive value.
+- The member of a template instance without a datatype, which data messages may
+  have, is `ErrUnknownType` from `GetValue`: the caller has the definition, the
+  `payload` package does not. Set its datatype from the definition first.
 - `GetQuality`, `bdSeq` and `seq` take the types the specification gives them;
   `host` and `app` read `bdSeq` from `long_value` only.
