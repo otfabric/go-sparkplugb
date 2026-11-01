@@ -133,6 +133,7 @@ type Node struct {
 	// primary host: an offline STATE older than it is ignored.
 	hostOnlineTS int64
 
+	pubMu          sync.RWMutex // held to publish; Disconnect takes it to end the session
 	rebirthMu      sync.Mutex
 	rebirthPending bool
 }
@@ -462,31 +463,35 @@ func (n *Node) Rebirth(ctx context.Context) error {
 }
 
 func (n *Node) Disconnect(ctx context.Context) error {
+	// The session ends first, and a message on its way goes out before the
+	// NDEATH: a rebirth requested now must not follow it.
+	n.pubMu.Lock()
 	n.mu.Lock()
 	if n.state == Closed || n.state == Disconnected {
 		n.mu.Unlock()
+		n.pubMu.Unlock()
 		return nil
 	}
-
+	var ndeath []byte
 	if n.born {
-		ndeath := n.buildNDEATH()
-		ndeathBytes, err := payload.Encode(ndeath)
-		if err == nil {
-			t := topic.Topic{
-				GroupID:    n.cfg.GroupID,
-				Type:       topic.NDEATH,
-				EdgeNodeID: n.cfg.EdgeNodeID,
-			}.String()
-			n.mu.Unlock()
-			_ = n.transport.Publish(ctx, t, 1, false, ndeathBytes)
-			n.mu.Lock()
+		if b, err := payload.Encode(n.buildNDEATH()); err == nil {
+			ndeath = b
 		}
 	}
 	n.born = false
 	n.birthMetrics = nil
 	n.setState(Disconnected)
 	n.mu.Unlock()
+	n.pubMu.Unlock()
 
+	if ndeath != nil {
+		t := topic.Topic{
+			GroupID:    n.cfg.GroupID,
+			Type:       topic.NDEATH,
+			EdgeNodeID: n.cfg.EdgeNodeID,
+		}.String()
+		_ = n.transport.Publish(ctx, t, 1, false, ndeath)
+	}
 	return n.transport.Disconnect(ctx)
 }
 
@@ -578,6 +583,14 @@ func (n *Node) publish(ctx context.Context, mt topic.MessageType, deviceID strin
 		return fmt.Errorf("sparkplugb: encode %s: %w", mt, err)
 	}
 
+	n.pubMu.RLock()
+	defer n.pubMu.RUnlock()
+	n.mu.Lock()
+	online := n.state == Online
+	n.mu.Unlock()
+	if !online {
+		return ErrNotConnected
+	}
 	return n.transport.Publish(ctx, t, 0, false, b)
 }
 

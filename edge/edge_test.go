@@ -1558,3 +1558,48 @@ func TestAliasUniqueness(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// deathHook runs a function when the NDEATH is about to be published.
+type deathHook struct {
+	*mockTransport
+	before func()
+}
+
+func (d *deathHook) Publish(ctx context.Context, t string, qos byte, retained bool, p []byte) error {
+	if strings.Contains(t, "/NDEATH/") {
+		d.before()
+	}
+	return d.mockTransport.Publish(ctx, t, qos, retained, p)
+}
+
+// A rebirth requested while the node disconnected went out after its NDEATH:
+// a host saw the node come back, and stayed with it online.
+func TestNoBirthAfterNDEATH(t *testing.T) {
+	tr := &deathHook{mockTransport: newMockTransport()}
+	n, err := New(tr, testConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := n.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	m, _ := payload.NewMetric("x", pb.DataType_Int32, int32(0))
+	if err := n.PublishBirth(ctx, []*pb.Payload_Metric{m}); err != nil {
+		t.Fatal(err)
+	}
+	tr.before = func() {
+		if err := n.Rebirth(ctx); !errors.Is(err, ErrNotConnected) {
+			t.Errorf("rebirth during Disconnect: %v, want ErrNotConnected", err)
+		}
+	}
+
+	if err := n.Disconnect(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	msgs := tr.getPublished()
+	if last := msgs[len(msgs)-1]; !strings.Contains(last.Topic, "/NDEATH/") {
+		t.Errorf("last published %s, want the NDEATH", last.Topic)
+	}
+}
