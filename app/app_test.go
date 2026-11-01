@@ -499,14 +499,14 @@ func TestApplicationAppliesNextSessionDBIRTHBeforeNBIRTH(t *testing.T) {
 	a.Connect(ctx)
 	defer a.Close(ctx)
 
-	mt.deliver("spBv1.0/plant/NBIRTH/gw1", encodeBirth(0, 1))
+	mt.deliver("spBv1.0/plant/NBIRTH/gw1", sessMsg(0, 1000, payload.BdSeqMetric(1)))
 	for seq := uint64(1); seq <= 5; seq++ {
-		mt.deliver("spBv1.0/plant/NDATA/gw1", encodeData(seq))
+		mt.deliver("spBv1.0/plant/NDATA/gw1", sessMsg(seq, 1000))
 	}
 	// The node restarts; the broker delivers the DBIRTH of the new session
 	// (seq 1, behind the current session's 6) before its NBIRTH.
-	mt.deliver("spBv1.0/plant/DBIRTH/gw1/motor1", encodeData(1))
-	mt.deliver("spBv1.0/plant/NBIRTH/gw1", encodeBirth(0, 2))
+	mt.deliver("spBv1.0/plant/DBIRTH/gw1/motor1", sessMsg(1, 1000))
+	mt.deliver("spBv1.0/plant/NBIRTH/gw1", sessMsg(0, 1000, payload.BdSeqMetric(2)))
 
 	ns := a.GetNode("plant", "gw1")
 	if ns == nil || ns.BdSeq != 2 || ns.Devices["motor1"] == nil || !ns.Devices["motor1"].Online {
@@ -1029,11 +1029,11 @@ func TestApplicationAppliesReorderedMessagesInSequence(t *testing.T) {
 
 	// Published as NBIRTH 0, DBIRTH 1, NDATA 2, DDATA 3, NDATA 4; delivered
 	// with the DBIRTH before the NBIRTH and NDATA 4 before NDATA 2.
-	mt.deliver("spBv1.0/g1/DBIRTH/n1/d1", encodeData(1, y(10)))
-	mt.deliver("spBv1.0/g1/NBIRTH/n1", encodeBirth(0, 0, x(1)))
-	mt.deliver("spBv1.0/g1/NDATA/n1", encodeData(4, x(3)))
-	mt.deliver("spBv1.0/g1/DDATA/n1/d1", encodeData(3, y(11)))
-	mt.deliver("spBv1.0/g1/NDATA/n1", encodeData(2, x(2)))
+	mt.deliver("spBv1.0/g1/DBIRTH/n1/d1", sessMsg(1, 1000, y(10)))
+	mt.deliver("spBv1.0/g1/NBIRTH/n1", sessMsg(0, 1000, payload.BdSeqMetric(0), x(1)))
+	mt.deliver("spBv1.0/g1/NDATA/n1", sessMsg(4, 1000, x(3)))
+	mt.deliver("spBv1.0/g1/DDATA/n1/d1", sessMsg(3, 1000, y(11)))
+	mt.deliver("spBv1.0/g1/NDATA/n1", sessMsg(2, 1000, x(2)))
 
 	ns := a.GetNode("g1", "n1")
 	if ns == nil || ns.Devices["d1"] == nil {

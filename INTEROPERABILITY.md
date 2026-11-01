@@ -77,7 +77,9 @@ or `uint64`: it is checked by the table above and written in the form above.
 | Situation | What the host (package `host`) and the application (package `app`) do |
 |-----------|-------------------------------------------------------------|
 | Messages of a node out of `seq` order | Held, at most 256 per node and 30 seconds, and applied in `seq` order once the gap is filled. MQTT orders messages per topic only, and NanoMQ and HiveMQ CE do deliver a node's DBIRTH before its NBIRTH and data out of order |
-| Message behind the expected `seq` | Held for the node's next session and applied after its NBIRTH, without a rebirth request: a restarted node's DBIRTH may arrive before its NBIRTH |
+| Message behind the expected `seq` | Held for the node's next session and applied after its NBIRTH: a restarted node's DBIRTH may arrive before its NBIRTH. When no NBIRTH follows within 2 seconds, NCMD `Node Control/Rebirth` |
+| Message out of sequence, older than the node's current NBIRTH | Dropped, up to 30 seconds after that NBIRTH, and held messages older than an NBIRTH are dropped when it arrives: they are of a session that has ended. Reading: Sparkplug has the payload timestamp be the time of publishing, and data messages carry no session number. A message without a timestamp is not judged, and one in sequence is applied. |
+| Message applied to a session, newer than the NBIRTH that follows it, or a DBIRTH of the same millisecond | Applied again after that NBIRTH: it is of the new session, and arrived with the `seq` the session before expected |
 | A gap that is not filled | NCMD `Node Control/Rebirth` after `ReorderTimeout` (host), at once without it |
 | Data or DBIRTH from a node without a birth | NCMD `Node Control/Rebirth` |
 | Any of the rebirth requests above | One pending per node: the next waits for the NBIRTH or 2 seconds, however many messages are out of order |

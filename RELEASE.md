@@ -1,5 +1,21 @@
 # go-sparkplugb Releases
 
+## v0.3.1
+
+**Date:** 2026-11-01
+**Previous release:** v0.3.0
+
+### Fixed
+
+- **`host` and `app` keep the sessions of an edge node apart when a broker reorders messages across topics.** MQTT orders messages per topic only, and data messages carry no session number; with rebirths overlapping, as a reordering broker causes, the host took messages of one session for another. Three outcomes, all seen against srad on NanoMQ and reproduced with a unit test each: devices missing after the births until the next rebirth; a device with the values of an earlier session after a restart; and the state frozen, because held data of the ended session carried `seq` past the edge node's, after which every message was behind and held, and no rebirth was requested. Now a message held or arriving out of sequence that is older than the current NBIRTH is dropped, the newest of a `seq` held twice is the one applied, and messages of the new session that were applied to the old one before its NBIRTH arrived are applied again after it.
+- **A message behind the expected `seq` requests a rebirth when no NBIRTH follows within 2 seconds.** It used to wait for that NBIRTH for ever. A duplicate delivered late now costs one rebirth.
+
+### Tests
+
+- A simulated broker that keeps the order per topic only, and an edge node with overlapping rebirths, against `host` and `app`: 400 seeds each. Before the fix about 11 in 100 ended without the edge node's state.
+
+---
+
 ## v0.3.0
 
 **Date:** 2026-11-01
