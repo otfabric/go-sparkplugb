@@ -13,6 +13,7 @@
 ### Tests
 
 - The order and `seq` of eight devices' DBIRTHs over twenty rebirths, one of them dead and one born again.
+- A failed NBIRTH or DBIRTH in a rebirth: the error names it and no later DBIRTH follows.
 
 ---
 
