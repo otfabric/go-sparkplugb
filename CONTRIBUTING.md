@@ -19,6 +19,10 @@ make interop         # against the sparkplugb-interop images (the interop/ modul
 make help            # every target
 ```
 
+Against the latest published go-sparkplugb (the Self-interop workflow, run by hand,
+never required): `SPARKPLUGB_INTEROP_ADAPTERS=otfabric SPARKPLUGB_INTEROP_BROKERS=mosquitto
+SPARKPLUGB_INTEROP_OTFABRIC_IMAGE=ghcr.io/otfabric/sparkplugb-interop-otfabric:latest make interop`.
+
 ## Pull requests
 
 - Work on a branch and open a PR against `main`. CI must be green.

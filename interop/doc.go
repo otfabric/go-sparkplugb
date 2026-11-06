@@ -33,5 +33,8 @@
 // Environment: SPARKPLUGB_INTEROP_ADAPTERS and SPARKPLUGB_INTEROP_BROKERS
 // select a comma-separated subset; SPARKPLUGB_INTEROP_<NAME>_IMAGE overrides
 // one image (images.go), and an empty value drops that adapter;
+// SPARKPLUGB_INTEROP_OTFABRIC_IMAGE adds go-sparkplugb itself as
+// sparkplugb-interop publishes it (sparkplugb-interop-otfabric), which has no
+// default;
 // SPARKPLUGB_INTEROP_PARALLEL bounds how many brokers run at once (default 4).
 package interop

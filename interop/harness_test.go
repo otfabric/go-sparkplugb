@@ -47,6 +47,11 @@ func adapters(t testing.TB) []adapter {
 		{"srad", envImage("srad", SradImage)},
 		{"tahu-js", envImage("tahu-js", TahuJSImage)},
 		{"sparkplughost", envImage("sparkplughost", SparkplugHostImage)},
+		// go-sparkplugb itself, as sparkplugb-interop publishes it
+		// (sparkplugb-interop-otfabric): only when
+		// SPARKPLUGB_INTEROP_OTFABRIC_IMAGE names an image. Not an
+		// independent implementation, and never a default.
+		{"otfabric", envImage("otfabric", "")},
 	}
 	return selectNamed(t, "SPARKPLUGB_INTEROP_ADAPTERS", all, func(a adapter) (string, string) { return a.name, a.image })
 }
