@@ -1,5 +1,22 @@
 # go-sparkplugb Releases
 
+## v0.3.4
+
+**Date:** 2026-11-06
+**Previous release:** v0.3.3
+
+### Fixed
+
+- **`edge`: a rebirth publishes the DBIRTHs in the order the devices were first born.** `Node.Rebirth`, and so the answer to an NCMD rebirth, ranged over a map, so the order of the DBIRTHs and their `seq` changed from one rebirth to the next. Sparkplug 3.0.0 fixes no order among them, so hosts were not wrong to accept it, but a run could not be repeated. Seen in sparkplugb-interop, whose cross-stack test expects the order of the fixture. A device born again after its death keeps its place.
+- **`edge`: `Rebirth` takes the devices' state under the lock.** It read whether a device was online, and its metrics, after releasing it, a data race with a device death or data published at the same time.
+
+### Tests
+
+- The order and `seq` of eight devices' DBIRTHs over twenty rebirths, one of them dead and one born again.
+- A failed NBIRTH or DBIRTH in a rebirth: the error names it and no later DBIRTH follows.
+
+---
+
 ## v0.3.3
 
 **Date:** 2026-11-01
