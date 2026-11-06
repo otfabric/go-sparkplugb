@@ -144,6 +144,12 @@ primary host going offline) and the wire behaviour are described in
 [INTEROPERABILITY.md](INTEROPERABILITY.md). Run it with `make interop`
 (Docker).
 
+sparkplugb-interop also publishes go-sparkplugb itself behind the same contract,
+as `ghcr.io/otfabric/sparkplugb-interop-otfabric`, for other stacks to test
+against. The manual Self-interop workflow runs this library against its
+`:latest`; that is a regression check between releases, not independent
+evidence, and it is never required.
+
 ## Installation
 
 ```bash

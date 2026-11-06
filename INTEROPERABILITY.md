@@ -132,6 +132,14 @@ the steps that need it; each skip and known difference is logged with its
 reason. The differences are described in
 [sparkplugb-interop's COMPATIBILITY.md](https://github.com/otfabric/sparkplugb-interop/blob/main/docs/COMPATIBILITY.md).
 
+The same suite runs against go-sparkplugb itself, as sparkplugb-interop publishes
+it (`ghcr.io/otfabric/sparkplugb-interop-otfabric`, adapter `otfabric`), when
+`SPARKPLUGB_INTEROP_OTFABRIC_IMAGE` names an image: the manual Self-interop
+workflow runs this commit against `:latest`, in both roles, on Mosquitto. That
+finds a change on the wire that breaks an earlier release. It is not
+independent verification, never a required check, and nothing here pins the
+image, so publishing it can never ask for a release of this library.
+
 The suite (`make interop`, module `interop/`):
 
 - **TestHost**, the go-sparkplugb host against each reference edge on each

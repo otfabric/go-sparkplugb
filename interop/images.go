@@ -32,6 +32,11 @@ const (
 	SparkplugHostImage = "ghcr.io/otfabric/sparkplugb-interop-sparkplughost:" + InteropRelease + "@sha256:5ca0a074f7f8ef7b2480fb53f86151b673991415c10e804ba53168da5c82d807"
 )
 
+// There is no default image of go-sparkplugb itself (sparkplugb-interop's
+// otfabric adapter, ghcr.io/otfabric/sparkplugb-interop-otfabric): it runs only
+// when SPARKPLUGB_INTEROP_OTFABRIC_IMAGE names one, as the Self-interop
+// workflow does with :latest. A pass against it is not independent evidence.
+
 // The MQTT brokers, pinned by multi-arch digest as sparkplugb-interop
 // InteropRelease pins them (its manifest.json). Override with the variable
 // named beside each.
