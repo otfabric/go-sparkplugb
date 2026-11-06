@@ -116,6 +116,7 @@ type Node struct {
 	bdSeq   uint64
 	seq     uint64
 	devices map[string]*Device
+	order   []string          // device IDs in the order of their first DBIRTH
 	aliases map[uint64]string // alias -> metric name
 	owners  map[uint64]string // alias -> device ID, "" for the node
 	born    bool
@@ -338,6 +339,7 @@ func (n *Node) PublishDeviceBirth(ctx context.Context, deviceID string, metrics 
 
 	if _, exists := n.devices[deviceID]; !exists {
 		n.devices[deviceID] = &Device{ID: deviceID}
+		n.order = append(n.order, deviceID)
 	}
 	n.devices[deviceID].Metrics = make([]*pb.Payload_Metric, len(metrics))
 	copy(n.devices[deviceID].Metrics, metrics)
@@ -434,7 +436,8 @@ func (n *Node) PublishDeviceDeath(ctx context.Context, deviceID string) error {
 }
 
 // Rebirth re-publishes the full birth sequence: NBIRTH followed by DBIRTH
-// for each online device. It resets the sequence counter per the spec.
+// for each online device, in the order the devices were first born. It
+// resets the sequence counter per the spec.
 func (n *Node) Rebirth(ctx context.Context) error {
 	n.mu.Lock()
 	if n.state != Online {
@@ -442,9 +445,15 @@ func (n *Node) Rebirth(ctx context.Context) error {
 		return ErrNotConnected
 	}
 	birthMetrics := n.birthMetrics
-	devices := make(map[string]*Device, len(n.devices))
-	for k, v := range n.devices {
-		devices[k] = v
+	type birth struct {
+		id      string
+		metrics []*pb.Payload_Metric
+	}
+	var births []birth
+	for _, id := range n.order {
+		if dev := n.devices[id]; dev.Online {
+			births = append(births, birth{id, dev.Metrics})
+		}
 	}
 	n.mu.Unlock()
 
@@ -452,11 +461,9 @@ func (n *Node) Rebirth(ctx context.Context) error {
 		return fmt.Errorf("sparkplugb: rebirth NBIRTH: %w", err)
 	}
 
-	for id, dev := range devices {
-		if dev.Online {
-			if err := n.PublishDeviceBirth(ctx, id, dev.Metrics); err != nil {
-				return fmt.Errorf("sparkplugb: rebirth DBIRTH %s: %w", id, err)
-			}
+	for _, b := range births {
+		if err := n.PublishDeviceBirth(ctx, b.id, b.metrics); err != nil {
+			return fmt.Errorf("sparkplugb: rebirth DBIRTH %s: %w", b.id, err)
 		}
 	}
 	return nil

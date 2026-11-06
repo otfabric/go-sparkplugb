@@ -25,6 +25,7 @@ type mockTransport struct {
 	handlers    map[string]mqtt.MessageHandler
 	connectOpts mqtt.ConnectOpts
 	connectErr  error
+	failTopic   string // Publish to a topic containing it fails
 }
 
 type publishedMsg struct {
@@ -59,6 +60,9 @@ func (m *mockTransport) Publish(_ context.Context, t string, qos byte, retained 
 	defer m.mu.Unlock()
 	if !m.connected {
 		return errors.New("not connected")
+	}
+	if m.failTopic != "" && strings.Contains(t, m.failTopic) {
+		return errors.New("publish failed")
 	}
 	m.published = append(m.published, publishedMsg{t, qos, retained, p})
 	return nil
@@ -419,6 +423,102 @@ func TestRebirthWithDevices(t *testing.T) {
 	}
 	if rebirthMsgs[1].Topic != "spBv1.0/testGroup/DBIRTH/testNode/dev1" {
 		t.Errorf("second rebirth msg topic = %q, want DBIRTH/dev1", rebirthMsgs[1].Topic)
+	}
+}
+
+// TestRebirthDeviceOrder: a rebirth publishes the DBIRTHs in the order the
+// devices were first born, with consecutive seqs, and leaves out a dead one.
+func TestRebirthDeviceOrder(t *testing.T) {
+	tr := newMockTransport()
+	n, err := New(tr, testConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := n.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.PublishBirth(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	ids := []string{"pump1", "meter1", "valve7", "a", "zz", "dev10", "dev2", "m"}
+	for i, id := range ids {
+		m, _ := payload.NewMetric("v", pb.DataType_Int32, int32(i))
+		if err := n.PublishDeviceBirth(ctx, id, []*pb.Payload_Metric{m}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := n.PublishDeviceDeath(ctx, "a"); err != nil {
+		t.Fatal(err)
+	}
+	// Born again later: keeps its place.
+	m, _ := payload.NewMetric("v", pb.DataType_Int32, int32(99))
+	if err := n.PublishDeviceBirth(ctx, "meter1", []*pb.Payload_Metric{m}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"pump1", "meter1", "valve7", "zz", "dev10", "dev2", "m"}
+	for round := 0; round < 20; round++ {
+		before := len(tr.getPublished())
+		if err := n.Rebirth(ctx); err != nil {
+			t.Fatal(err)
+		}
+		msgs := tr.getPublished()[before:]
+		if len(msgs) != 1+len(want) {
+			t.Fatalf("round %d: %d messages, want %d", round, len(msgs), 1+len(want))
+		}
+		for i, id := range want {
+			msg := msgs[1+i]
+			if topic := "spBv1.0/testGroup/DBIRTH/testNode/" + id; msg.Topic != topic {
+				t.Fatalf("round %d: DBIRTH %d is %q, want %q", round, i, msg.Topic, topic)
+			}
+			p, err := payload.Decode(msg.Payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if p.GetSeq() != uint64(1+i) {
+				t.Errorf("round %d: %s seq %d, want %d", round, id, p.GetSeq(), 1+i)
+			}
+		}
+	}
+}
+
+// TestRebirthPublishErrors: a failed NBIRTH or DBIRTH ends the rebirth with
+// an error that names it.
+func TestRebirthPublishErrors(t *testing.T) {
+	for _, c := range []struct{ fail, want string }{
+		{"/NBIRTH/", "rebirth NBIRTH"},
+		{"/DBIRTH/testNode/dev2", "rebirth DBIRTH dev2"},
+	} {
+		tr := newMockTransport()
+		n, err := New(tr, testConfig())
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx := context.Background()
+		if err := n.Connect(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if err := n.PublishBirth(ctx, nil); err != nil {
+			t.Fatal(err)
+		}
+		for _, id := range []string{"dev1", "dev2", "dev3"} {
+			if err := n.PublishDeviceBirth(ctx, id, nil); err != nil {
+				t.Fatal(err)
+			}
+		}
+		tr.mu.Lock()
+		tr.failTopic = c.fail
+		tr.mu.Unlock()
+		before := len(tr.getPublished())
+		err = n.Rebirth(ctx)
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: error %v, want %q", c.fail, err, c.want)
+		}
+		for _, m := range tr.getPublished()[before:] {
+			if strings.HasSuffix(m.Topic, "/dev3") {
+				t.Errorf("%s: dev3 born after the failure", c.fail)
+			}
+		}
 	}
 }
 
