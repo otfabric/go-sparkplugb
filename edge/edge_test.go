@@ -422,6 +422,62 @@ func TestRebirthWithDevices(t *testing.T) {
 	}
 }
 
+// TestRebirthDeviceOrder: a rebirth publishes the DBIRTHs in the order the
+// devices were first born, with consecutive seqs, and leaves out a dead one.
+func TestRebirthDeviceOrder(t *testing.T) {
+	tr := newMockTransport()
+	n, err := New(tr, testConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := n.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.PublishBirth(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	ids := []string{"pump1", "meter1", "valve7", "a", "zz", "dev10", "dev2", "m"}
+	for i, id := range ids {
+		m, _ := payload.NewMetric("v", pb.DataType_Int32, int32(i))
+		if err := n.PublishDeviceBirth(ctx, id, []*pb.Payload_Metric{m}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := n.PublishDeviceDeath(ctx, "a"); err != nil {
+		t.Fatal(err)
+	}
+	// Born again later: keeps its place.
+	m, _ := payload.NewMetric("v", pb.DataType_Int32, int32(99))
+	if err := n.PublishDeviceBirth(ctx, "meter1", []*pb.Payload_Metric{m}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"pump1", "meter1", "valve7", "zz", "dev10", "dev2", "m"}
+	for round := 0; round < 20; round++ {
+		before := len(tr.getPublished())
+		if err := n.Rebirth(ctx); err != nil {
+			t.Fatal(err)
+		}
+		msgs := tr.getPublished()[before:]
+		if len(msgs) != 1+len(want) {
+			t.Fatalf("round %d: %d messages, want %d", round, len(msgs), 1+len(want))
+		}
+		for i, id := range want {
+			msg := msgs[1+i]
+			if topic := "spBv1.0/testGroup/DBIRTH/testNode/" + id; msg.Topic != topic {
+				t.Fatalf("round %d: DBIRTH %d is %q, want %q", round, i, msg.Topic, topic)
+			}
+			p, err := payload.Decode(msg.Payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if p.GetSeq() != uint64(1+i) {
+				t.Errorf("round %d: %s seq %d, want %d", round, id, p.GetSeq(), 1+i)
+			}
+		}
+	}
+}
+
 func TestRebirthNotOnline(t *testing.T) {
 	tr := newMockTransport()
 	n, err := New(tr, testConfig())
