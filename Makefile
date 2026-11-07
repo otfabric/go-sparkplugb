@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help all build fmt fmt-check lint lint-ci vet vuln test stress coverage coverage-pkg-check cover coverage-gate fuzz bench e2e generate generate-check cross check clean test-interop interop
+.PHONY: help all build fmt fmt-check lint lint-ci vet vuln test stress coverage coverage-pkg-check cover coverage-gate fuzz bench e2e generate generate-check cross check clean test-interop interop docs-check
 
 help: ## This help
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z0-9_-]+:.*?## / {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -17,6 +17,8 @@ COVER_PKGS := $(shell go list ./... | grep -vE '/examples|/proto$$' | paste -sd,
 COVER_MIN ?= 90
 # Per-package floor (TEST-012), over the packages of COVER_PKGS.
 COVER_PKG_MIN := 80
+# docsync release of docs-check (DOC-008).
+DOCSYNC_VERSION := v0.2.0
 
 all: build ## Default target: build the examples
 
@@ -129,7 +131,11 @@ cross: ## Cross-compile for common platforms
 	GOOS=darwin  GOARCH=arm64 go build ./...
 	GOOS=windows GOARCH=amd64 go build ./...
 
-check: fmt fmt-check lint lint-ci vet vuln test coverage-gate coverage-pkg-check ## Run format + lint + vet + vuln + test + coverage gate
+check: fmt fmt-check lint lint-ci vet vuln test coverage-gate coverage-pkg-check docs-check ## Run format + lint + vet + vuln + test + coverage gate
+
+# The documents against the code (DOC-008): docsync, as docs.yml runs it.
+docs-check: ## Check that the documents agree with the code (docsync)
+	@go run github.com/otfabric/docsync@$(DOCSYNC_VERSION) check .
 
 clean: ## Remove generated binaries and coverage artifacts
 	@echo "Cleaning up"
