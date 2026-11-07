@@ -6,10 +6,10 @@ Generated from the source of `github.com/otfabric/go-sparkplugb` with `docsync a
 
 | Package | Synopsis |
 |---|---|
-| [github.com/otfabric/go-sparkplugb](go-sparkplugb.md) |  |
-| [github.com/otfabric/go-sparkplugb/app](app.md) |  |
-| [github.com/otfabric/go-sparkplugb/edge](edge.md) |  |
-| [github.com/otfabric/go-sparkplugb/host](host.md) |  |
-| [github.com/otfabric/go-sparkplugb/mqtt](mqtt.md) |  |
-| [github.com/otfabric/go-sparkplugb/payload](payload.md) |  |
-| [github.com/otfabric/go-sparkplugb/topic](topic.md) |  |
+| [github.com/otfabric/go-sparkplugb](go-sparkplugb.md) | Package sparkplugb holds what the edge, host and app packages of this Sparkplug B module share: the Logger and FieldLogger they log through and the RetryPolicy, such as ExponentialBackoff, that decides reconnection. |
+| [github.com/otfabric/go-sparkplugb/app](app.md) | Package app implements a Sparkplug B Application that is not a Primary Host: it subscribes to the spBv1.0 namespace, tracks edge nodes and devices, resolves metric aliases and sends NCMD/DCMD commands, but never publishes STATE. |
+| [github.com/otfabric/go-sparkplugb/edge](edge.md) | Package edge implements a Sparkplug B Edge Node: the NBIRTH/NDEATH and DBIRTH/DDEATH lifecycle with bdSeq and seq numbering, data publishing, rebirth on command, and optional waiting for the Primary Host's STATE with server walking across brokers. |
+| [github.com/otfabric/go-sparkplugb/host](host.md) | Package host implements a Sparkplug B Primary Host Application: it publishes STATE birth and death certificates, keeps a registry of edge nodes and devices, validates seq ordering with reordering and rebirth requests, and sends NCMD/DCMD commands. |
+| [github.com/otfabric/go-sparkplugb/mqtt](mqtt.md) | Package mqtt defines the Transport interface through which the edge, host and app packages use an MQTT broker, and PahoTransport, its implementation on the Eclipse Paho client. |
+| [github.com/otfabric/go-sparkplugb/payload](payload.md) | Package payload builds, encodes and decodes Sparkplug B Protobuf payloads: metrics with typed values and aliases, properties, data sets, templates, quality, and the bdSeq and rebirth control metrics. |
+| [github.com/otfabric/go-sparkplugb/topic](topic.md) | Package topic parses and builds Sparkplug B topic names in the spBv1.0 namespace: message types (NBIRTH, DDATA, NCMD, ...), edge node and device topics, and the STATE topic of a host application. |
