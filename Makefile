@@ -18,7 +18,7 @@ COVER_MIN ?= 90
 # Per-package floor (TEST-012), over the packages of COVER_PKGS.
 COVER_PKG_MIN := 80
 # docsync release of docs-check (DOC-008).
-DOCSYNC_VERSION := v0.3.0
+DOCSYNC_VERSION := v0.3.1
 
 all: build ## Default target: build the examples
 

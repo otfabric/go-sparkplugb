@@ -17,7 +17,7 @@ jobs:
   ci:
     uses: otfabric/.github/.github/workflows/go-ci.yml@v3.3.0
     with:
-      policy-version: v1.4.1
+      policy-version: v1.4.2
       codecov-name: go-sparkplugb
       go-versions: '["1.26", "1.27"]'
       test-exclude-regex: "(/example(s)?($|/)|/proto($|/))"
