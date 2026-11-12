@@ -96,6 +96,12 @@ func (t *PahoTransport) Subscribe(ctx context.Context, topic string, qos byte, h
 ```go
 type Transport interface {
 	Connect(ctx context.Context, opts ConnectOpts) error
+	// Publish sends a message. When Publish returns, with or without an
+	// error, the message is either ahead of every message published after
+	// that on the connection, or never sent: a Publish that gives up on ctx
+	// or a timeout while the message may still go out must not return before
+	// its place is fixed. The edge node depends on this to keep the seq of a
+	// session in order on the wire across a rebirth.
 	Publish(ctx context.Context, topic string, qos byte, retained bool, payload []byte) error
 	Subscribe(ctx context.Context, topic string, qos byte, handler MessageHandler) error
 	Disconnect(ctx context.Context) error

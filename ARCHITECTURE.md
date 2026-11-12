@@ -19,6 +19,7 @@ Each runtime keeps one mutex-protected state machine. Edge node states: `Disconn
 ## Goroutines
 
 - Messages arrive on the goroutines of the transport, which call the handler given to `Subscribe`. Callbacks in `Config` run there, so a slow callback holds up the message flow.
+- The edge node publishes one message at a time: a message takes its `seq` and goes to the transport under one lock, which a rebirth holds for its NBIRTH and all its DBIRTHs. Publishes from several goroutines are safe and reach the wire in `seq` order, given the ordering `mqtt.Transport.Publish` documents; a slow `Publish` of the transport holds up the others. `PahoTransport.Publish` keeps that ordering by returning, on its context or timeout too, only once paho has the message in line, or once the connection has ended.
 - The edge node starts one goroutine per auto-rebirth (`edge.go`, on an NCMD rebirth request) and one for server walking.
 - `host` and `app` start one goroutine per rebirth request they send.
 

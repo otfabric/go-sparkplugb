@@ -1,5 +1,32 @@
 # go-sparkplugb Releases
 
+## v0.3.5
+
+**Date:** 2026-11-12
+**Previous release:** v0.3.4
+
+### Fixed
+
+- **`edge`: a message published during a rebirth no longer carries a `seq` of the ending session.** A `Publish*` call took its `seq` under the lock but stamped and published the message after releasing it, and `Rebirth` did not stop other publishes. A DDATA could take its `seq` before the NBIRTH reset the counter and go out after it, with a timestamp no older than the NBIRTH's, and data could go out between the NBIRTH and its device's DBIRTH. A host applied the old value in the place of the new session's message with that `seq`, which was lost (go-sparkplugb#24). A message now takes its `seq` and is published under one lock, which `Rebirth` holds for the NBIRTH and all DBIRTHs; data published meanwhile waits and follows them. Publishes from several goroutines also reach the transport in `seq` order now, where before they could overtake each other.
+- **`edge`: an NBIRTH is stamped in a later millisecond than the message before it,** waiting up to a millisecond for the clock; a clock that went back is not waited for (LIMITATIONS.md). A message of the ending session in the millisecond of the NBIRTH, delivered before it, was taken by a host for one of the new session; older than the NBIRTH, it is dropped as of the ending session.
+- **`mqtt`: a `PahoTransport.Publish` that returns on its context or timeout can no longer be overtaken.** It returned while paho could still be handing the message to the connection's writer, and a later publish could get there first; with the context already ended, the message was still sent, after the next one. A publish whose context has ended no longer starts, and one that gives up waits until paho has the message in line, bounded by `PublishTimeout`, or until the connection ends. Without this the `edge` serialization above could still let a message of the ending session follow an NBIRTH.
+
+### Changed
+
+- **`mqtt.Transport.Publish` documents the ordering a transport must keep:** when it returns, with or without an error, the message is ahead of every later one or never sent. A custom transport that returns earlier breaks the `seq` order of an edge node.
+
+### Documentation
+
+- LIMITATIONS.md: the two cases in which `host` and `app` cannot tell a message of the ending session from one of the new session, which of them this library's edge node rules out (the same millisecond as the NBIRTH, while its clock does not go back) and which remains with any edge node (older, but delivered after the NBIRTH with the `seq` expected next), and how `host` and `app` recover: a rebirth once 2 s pass without an NBIRTH, which restores the state but not the value delivered meanwhile.
+
+### Tests
+
+- Four goroutines publishing node and device data during a hundred rebirths: every session counts from 0 in order on the wire, no DDATA precedes its DBIRTH, and every NBIRTH is stamped after the message before it. `birthTime` with an injected clock: later, the same millisecond, and a clock that went back.
+- `PahoTransport` against a broker that records the order: a publish with an ended context is not sent, and one whose context ends while paho holds it back keeps its place.
+- `host` and `app`: both cases of a message of the ending session taking the place of the new session's, the value delivered and the rebirth that restores the state.
+
+---
+
 ## v0.3.4
 
 **Date:** 2026-11-06

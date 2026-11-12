@@ -111,7 +111,12 @@ func (t *PahoTransport) Publish(ctx context.Context, topic string, qos byte, ret
 		return fmt.Errorf("sparkplugb: not connected")
 	}
 
-	return t.await(ctx, closed, "publish", func() paho.Token {
+	// A publish whose context has ended does not start: started, paho could
+	// still send it after Publish returns.
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("sparkplugb: publish: %w", err)
+	}
+	return t.await(ctx, closed, "publish", true, func() paho.Token {
 		return client.Publish(topic, qos, retained, payload)
 	})
 }
@@ -129,7 +134,7 @@ func (t *PahoTransport) Subscribe(ctx context.Context, topic string, qos byte, h
 		handler(msg.Topic(), msg.Payload())
 	}
 
-	return t.await(ctx, closed, "subscribe", func() paho.Token {
+	return t.await(ctx, closed, "subscribe", false, func() paho.Token {
 		return client.Subscribe(topic, qos, callback)
 	})
 }
@@ -137,11 +142,21 @@ func (t *PahoTransport) Subscribe(ctx context.Context, topic string, qos byte, h
 // await runs a paho operation and returns when it completes, ctx ends, the
 // connection ends or PublishTimeout passes. op runs in its own goroutine
 // because paho can block in the call itself, before it returns a token.
-func (t *PahoTransport) await(ctx context.Context, closed <-chan struct{}, what string, op func() paho.Token) error {
+//
+// With ordered set, await does not return before op has: paho hands a
+// publish to the one writer of the connection when Client.Publish returns,
+// and keeps that order. Returning earlier, on ctx or the timeout, would let
+// a later publish overtake this one, which still goes out. So when Publish
+// returns, its message is either ahead of every later publish or not sent:
+// op failed, or the connection ended. The wait is bounded by the write
+// timeout paho has from PublishTimeout.
+func (t *PahoTransport) await(ctx context.Context, closed <-chan struct{}, what string, ordered bool, op func() paho.Token) error {
 	done := make(chan error, 1)
+	handed := make(chan struct{})
 	timeout := fmt.Errorf("sparkplugb: %s timeout", what)
 	go func() {
 		token := op()
+		close(handed)
 		if !token.WaitTimeout(t.PublishTimeout) {
 			done <- timeout
 			return
@@ -151,16 +166,24 @@ func (t *PahoTransport) await(ctx context.Context, closed <-chan struct{}, what 
 
 	timer := time.NewTimer(t.PublishTimeout)
 	defer timer.Stop()
+	var err error
 	select {
-	case err := <-done:
+	case err = <-done:
 		return err
-	case <-ctx.Done():
-		return fmt.Errorf("sparkplugb: %s: %w", what, ctx.Err())
 	case <-closed:
 		return fmt.Errorf("sparkplugb: %s: %w", what, ErrConnectionLost)
+	case <-ctx.Done():
+		err = fmt.Errorf("sparkplugb: %s: %w", what, ctx.Err())
 	case <-timer.C:
-		return timeout
+		err = timeout
 	}
+	if ordered {
+		select {
+		case <-handed:
+		case <-closed: // the message cannot go out on a later connection
+		}
+	}
+	return err
 }
 
 func (t *PahoTransport) Disconnect(ctx context.Context) error {
