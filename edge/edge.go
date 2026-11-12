@@ -134,7 +134,17 @@ type Node struct {
 	// primary host: an offline STATE older than it is ignored.
 	hostOnlineTS int64
 
-	pubMu          sync.RWMutex // held to publish; Disconnect takes it to end the session
+	// seqMu keeps the messages of a session in sequence on the wire: it is
+	// held from taking a seq until the message is published, and by Rebirth
+	// for its whole birth sequence, so no message of the ending session
+	// follows the NBIRTH and no data goes between it and the DBIRTHs. Taken
+	// before pubMu and mu.
+	seqMu sync.Mutex
+	// lastTS is the payload timestamp of the last message handed to the
+	// transport, under seqMu: the next NBIRTH is stamped later (birthTime).
+	lastTS         uint64
+	now            func() time.Time // the clock of birthTime
+	pubMu          sync.RWMutex     // held to publish; Disconnect takes it to end the session
 	rebirthMu      sync.Mutex
 	rebirthPending bool
 }
@@ -176,6 +186,7 @@ func New(transport mqtt.Transport, cfg Config) (*Node, error) {
 		aliases:   make(map[uint64]string),
 		owners:    make(map[uint64]string),
 		closeCh:   make(chan struct{}),
+		now:       time.Now,
 	}, nil
 }
 
@@ -280,6 +291,12 @@ func (n *Node) Connect(ctx context.Context) error {
 }
 
 func (n *Node) PublishBirth(ctx context.Context, nodeMetrics []*pb.Payload_Metric) error {
+	n.seqMu.Lock()
+	defer n.seqMu.Unlock()
+	return n.publishBirth(ctx, nodeMetrics)
+}
+
+func (n *Node) publishBirth(ctx context.Context, nodeMetrics []*pb.Payload_Metric) error {
 	n.mu.Lock()
 	if n.state != Online {
 		n.mu.Unlock()
@@ -323,10 +340,40 @@ func (n *Node) PublishBirth(ctx context.Context, nodeMetrics []*pb.Payload_Metri
 	birthMetrics = append(birthMetrics, nodeMetrics...)
 
 	p := payload.NewPayload(seq, birthMetrics...)
+	ts := n.birthTime()
+	p.Timestamp = &ts
 	return n.publish(ctx, topic.NBIRTH, "", p)
 }
 
+// birthTime returns the timestamp of an NBIRTH: now, or the next millisecond
+// when the last message went out in this one. A host tells a message of the
+// ending session from one of the new session by timestamp only, so the
+// message before an NBIRTH must be older than it, not of its millisecond
+// (go-sparkplugb#24). The wait is a millisecond at most.
+//
+// A clock that went back is not waited for: the NBIRTH is stamped earlier
+// than the message before it, and a host may take that message for one of
+// the new session. Waiting would hold every publish of the node until the
+// clock caught up; stamping the NBIRTH ahead of the clock would make a host
+// drop the reordered messages of the new session as older than it.
+// Called with seqMu held.
+func (n *Node) birthTime() uint64 {
+	for {
+		ts := uint64(n.now().UnixMilli())
+		if ts != n.lastTS {
+			return ts
+		}
+		time.Sleep(time.Until(time.UnixMilli(int64(ts) + 1)))
+	}
+}
+
 func (n *Node) PublishDeviceBirth(ctx context.Context, deviceID string, metrics []*pb.Payload_Metric) error {
+	n.seqMu.Lock()
+	defer n.seqMu.Unlock()
+	return n.publishDeviceBirth(ctx, deviceID, metrics)
+}
+
+func (n *Node) publishDeviceBirth(ctx context.Context, deviceID string, metrics []*pb.Payload_Metric) error {
 	n.mu.Lock()
 	if !n.born {
 		n.mu.Unlock()
@@ -385,6 +432,12 @@ func aliasConflict(owners map[uint64]string, owner string, metrics []*pb.Payload
 }
 
 func (n *Node) PublishNodeData(ctx context.Context, metrics []*pb.Payload_Metric) error {
+	n.seqMu.Lock()
+	defer n.seqMu.Unlock()
+	return n.publishNodeData(ctx, metrics)
+}
+
+func (n *Node) publishNodeData(ctx context.Context, metrics []*pb.Payload_Metric) error {
 	n.mu.Lock()
 	if !n.born {
 		n.mu.Unlock()
@@ -401,6 +454,12 @@ func (n *Node) PublishNodeData(ctx context.Context, metrics []*pb.Payload_Metric
 }
 
 func (n *Node) PublishDeviceData(ctx context.Context, deviceID string, metrics []*pb.Payload_Metric) error {
+	n.seqMu.Lock()
+	defer n.seqMu.Unlock()
+	return n.publishDeviceData(ctx, deviceID, metrics)
+}
+
+func (n *Node) publishDeviceData(ctx context.Context, deviceID string, metrics []*pb.Payload_Metric) error {
 	n.mu.Lock()
 	if !n.born {
 		n.mu.Unlock()
@@ -419,6 +478,12 @@ func (n *Node) PublishDeviceData(ctx context.Context, deviceID string, metrics [
 }
 
 func (n *Node) PublishDeviceDeath(ctx context.Context, deviceID string) error {
+	n.seqMu.Lock()
+	defer n.seqMu.Unlock()
+	return n.publishDeviceDeath(ctx, deviceID)
+}
+
+func (n *Node) publishDeviceDeath(ctx context.Context, deviceID string) error {
 	n.mu.Lock()
 	if !n.born {
 		n.mu.Unlock()
@@ -437,8 +502,13 @@ func (n *Node) PublishDeviceDeath(ctx context.Context, deviceID string) error {
 
 // Rebirth re-publishes the full birth sequence: NBIRTH followed by DBIRTH
 // for each online device, in the order the devices were first born. It
-// resets the sequence counter per the spec.
+// resets the sequence counter per the spec. Messages published meanwhile wait
+// for it, and follow the births with the seq of the new session. The NBIRTH
+// is stamped in a later millisecond than the message before it, unless the
+// clock went back.
 func (n *Node) Rebirth(ctx context.Context) error {
+	n.seqMu.Lock()
+	defer n.seqMu.Unlock()
 	n.mu.Lock()
 	if n.state != Online {
 		n.mu.Unlock()
@@ -457,12 +527,12 @@ func (n *Node) Rebirth(ctx context.Context) error {
 	}
 	n.mu.Unlock()
 
-	if err := n.PublishBirth(ctx, birthMetrics); err != nil {
+	if err := n.publishBirth(ctx, birthMetrics); err != nil {
 		return fmt.Errorf("sparkplugb: rebirth NBIRTH: %w", err)
 	}
 
 	for _, b := range births {
-		if err := n.PublishDeviceBirth(ctx, b.id, b.metrics); err != nil {
+		if err := n.publishDeviceBirth(ctx, b.id, b.metrics); err != nil {
 			return fmt.Errorf("sparkplugb: rebirth DBIRTH %s: %w", b.id, err)
 		}
 	}
@@ -598,6 +668,7 @@ func (n *Node) publish(ctx context.Context, mt topic.MessageType, deviceID strin
 	if !online {
 		return ErrNotConnected
 	}
+	n.lastTS = p.GetTimestamp() // under seqMu, as every caller holds it
 	return n.transport.Publish(ctx, t, 0, false, b)
 }
 

@@ -462,7 +462,12 @@ func (s *session) remember(m heldMsg) {
 // A message published before the current NBIRTH, out of sequence, belongs to
 // a session that has ended (see superseded). It is dropped: applied to this
 // session it would take the place of a message of this session, or carry
-// the sequence number past the edge node's.
+// the sequence number past the edge node's. A message in sequence is applied
+// whatever its timestamp: an edge node may stamp a DBIRTH before its NBIRTH,
+// and dropping it would drop that DBIRTH at every rebirth. So is a message of
+// the ending session that arrives with the seq this one expects next; the
+// message of this session with that seq is then behind the sequence, and a
+// rebirth follows (see expectSession, and LIMITATIONS.md).
 func (a *App) hold(t topic.Topic, data []byte) bool {
 	p, err := payload.Decode(data)
 	if err != nil {

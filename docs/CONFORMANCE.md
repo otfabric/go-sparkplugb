@@ -68,7 +68,7 @@ applicable (broker or server requirement).
 |------------|--------|--------|-------|
 | NDATA metrics are a subset of NBIRTH | tck-id-message-flow-edge-node-data-publish-ndata | P | Not enforced by library |
 | DDATA metrics are a subset of DBIRTH | tck-id-message-flow-edge-node-data-publish-ddata | P | Not enforced by library |
-| seq increments for each message | tck-id-message-flow-edge-node-data-publish-seq | Y | |
+| seq increments for each message | tck-id-message-flow-edge-node-data-publish-seq | Y | On the wire in `seq` order, also when publishing from several goroutines and during a rebirth |
 | seq wraps from 255 to 0 | tck-id-message-flow-edge-node-data-publish-seq-wrap | Y | |
 
 ### Edge Node Rebirth

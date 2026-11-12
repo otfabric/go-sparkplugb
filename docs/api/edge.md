@@ -113,6 +113,16 @@ type Node struct {
 	// hostOnlineTS is the timestamp of the latest online STATE of the
 	// primary host: an offline STATE older than it is ignored.
 
+	// seqMu keeps the messages of a session in sequence on the wire: it is
+	// held from taking a seq until the message is published, and by Rebirth
+	// for its whole birth sequence, so no message of the ending session
+	// follows the NBIRTH and no data goes between it and the DBIRTHs. Taken
+	// before pubMu and mu.
+
+	// lastTS is the payload timestamp of the last message handed to the
+	// transport, under seqMu: the next NBIRTH is stamped later (birthTime).
+
+	// the clock of birthTime
 	// held to publish; Disconnect takes it to end the session
 
 }
@@ -184,7 +194,7 @@ func (n *Node) PublishNodeData(ctx context.Context, metrics []*pb.Payload_Metric
 func (n *Node) Rebirth(ctx context.Context) error
 ```
 
-Rebirth re-publishes the full birth sequence: NBIRTH followed by DBIRTH for each online device, in the order the devices were first born. It resets the sequence counter per the spec.
+Rebirth re-publishes the full birth sequence: NBIRTH followed by DBIRTH for each online device, in the order the devices were first born. It resets the sequence counter per the spec. Messages published meanwhile wait for it, and follow the births with the seq of the new session. The NBIRTH is stamped in a later millisecond than the message before it, unless the clock went back.
 
 #### func (Node) ResolveAlias
 
