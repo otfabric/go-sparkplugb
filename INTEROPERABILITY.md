@@ -93,7 +93,7 @@ or `uint64`: it is checked by the table above and written in the form above.
 Besides its own tests, the library is run on every push against six
 independent implementations, in every role they have, on four MQTT brokers.
 The reference builds are the images of
-[otfabric/sparkplugb-interop v0.3.0](https://github.com/otfabric/sparkplugb-interop/releases/tag/v0.3.0),
+[otfabric/sparkplugb-interop v0.4.0](https://github.com/otfabric/sparkplugb-interop/releases/tag/v0.4.0),
 pinned in [interop/images.go](interop/images.go):
 
 | Reference | Version | go-sparkplugb host and application ← reference edge | go-sparkplugb edge → reference host |

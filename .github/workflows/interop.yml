@@ -33,12 +33,12 @@ env:
   # Keep in step with interop/images.go (TestWorkflowPins). The brokers come
   # from Google's mirror of Docker Hub, by the same digests: anonymous Docker
   # Hub pulls are rate limited per runner address.
-  SPARKPLUGB_INTEROP_TAHU_IMAGE: ghcr.io/otfabric/sparkplugb-interop-tahu:v0.3.0@sha256:322127f8be82eb046abd28869eb47de6924b55288ab71fa6b011245d01ae5741
-  SPARKPLUGB_INTEROP_PYSPARKPLUG_IMAGE: ghcr.io/otfabric/sparkplugb-interop-pysparkplug:v0.3.0@sha256:1405e89f83df743b9054cccff289d7c65a873626b104b45341caad3fa98c5855
-  SPARKPLUGB_INTEROP_SPARKPLUGNET_IMAGE: ghcr.io/otfabric/sparkplugb-interop-sparkplugnet:v0.3.0@sha256:1a0aee704cf01a5b3d39d86201bba40b93e5df12cc5bca94a8bf340dca20a8ee
-  SPARKPLUGB_INTEROP_SRAD_IMAGE: ghcr.io/otfabric/sparkplugb-interop-srad:v0.3.0@sha256:e56a9188e33845fb634bd5804ff129641b619a353c2d79c2548635d6c532df65
-  SPARKPLUGB_INTEROP_TAHU_JS_IMAGE: ghcr.io/otfabric/sparkplugb-interop-tahu-js:v0.3.0@sha256:802bc5a2d574c981abf05bf58e077d261b18cf3237b8cfa0c2344441880dc2fb
-  SPARKPLUGB_INTEROP_SPARKPLUGHOST_IMAGE: ghcr.io/otfabric/sparkplugb-interop-sparkplughost:v0.3.0@sha256:5ca0a074f7f8ef7b2480fb53f86151b673991415c10e804ba53168da5c82d807
+  SPARKPLUGB_INTEROP_TAHU_IMAGE: ghcr.io/otfabric/sparkplugb-interop-tahu:v0.4.0@sha256:540056d47e9e7e257fbb14a48d7eb80dce5e79a4752acf1a59b4d74a6c40ddfa
+  SPARKPLUGB_INTEROP_PYSPARKPLUG_IMAGE: ghcr.io/otfabric/sparkplugb-interop-pysparkplug:v0.4.0@sha256:593281b65453b2eb4dacb57f014f6ab1789a8009927c18bfb207576e7c150993
+  SPARKPLUGB_INTEROP_SPARKPLUGNET_IMAGE: ghcr.io/otfabric/sparkplugb-interop-sparkplugnet:v0.4.0@sha256:c7b4bc620cb84ee276e93a43b60bb365c71144adfd78775b6454e219071f7dc9
+  SPARKPLUGB_INTEROP_SRAD_IMAGE: ghcr.io/otfabric/sparkplugb-interop-srad:v0.4.0@sha256:6617fe6493af987de17d603daf7b10bc406c53e90302b5a2f32774d446c516b0
+  SPARKPLUGB_INTEROP_TAHU_JS_IMAGE: ghcr.io/otfabric/sparkplugb-interop-tahu-js:v0.4.0@sha256:c4a5a0c73f84e7c12433335ff8cab4656293f2e87b12866b8736a93dcd850152
+  SPARKPLUGB_INTEROP_SPARKPLUGHOST_IMAGE: ghcr.io/otfabric/sparkplugb-interop-sparkplughost:v0.4.0@sha256:87a6d4834c3dc64ddc1e019491d7d798e514890d802220838c0c39a4dc788676
   SPARKPLUGB_INTEROP_MOSQUITTO_IMAGE: mirror.gcr.io/library/eclipse-mosquitto:2.1.2-alpine@sha256:860aeb5d63ce509508f6dcfb2bc8a1c1dd2bc60555b562b45ce90e52d8dabb0f
   SPARKPLUGB_INTEROP_HIVEMQ_CE_IMAGE: mirror.gcr.io/hivemq/hivemq-ce:2026.5@sha256:bac6d4d1d815bffe4bc9a7fca8d06ea12b32d34f84ef2f1851ff4548560ee67b
   SPARKPLUGB_INTEROP_EMQX_IMAGE: mirror.gcr.io/emqx/emqx:6.3.2@sha256:135116400e11b25224350b2e55c874f4e224d357b593fb554ca1b1f398c631ac

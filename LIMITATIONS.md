@@ -19,7 +19,7 @@ evidence in [INTEROPERABILITY.md](INTEROPERABILITY.md).
 
 - Run against six independent implementations (Eclipse Tahu Java and JavaScript,
   pysparkplug, SparkplugNet, srad, sparkplughost) through
-  [sparkplugb-interop](https://github.com/otfabric/sparkplugb-interop) v0.3.0,
+  [sparkplugb-interop](https://github.com/otfabric/sparkplugb-interop) v0.4.0,
   on Mosquitto, HiveMQ CE, EMQX and NanoMQ. Roles, exclusions and upstream
   defects are in [INTEROPERABILITY.md](INTEROPERABILITY.md#verification-status).
 - Arrays are covered by this repository's codec tests only: no fixture of the

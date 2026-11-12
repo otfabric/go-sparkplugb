@@ -1,5 +1,21 @@
 # go-sparkplugb Releases
 
+## v0.3.6
+
+**Date:** 2026-11-12
+**Previous release:** v0.3.5
+
+### Changed
+
+- **The interop suite pins sparkplugb-interop v0.4.0** (container contract 0.3), which it had at v0.3.0: `interop/images.go` and the Interop workflow take the reference images by the digests of its `manifest.json`. The reference adapters, their upstream versions, the fixtures and the brokers do not change. Contract 0.3 lets the DBIRTHs of a rebirth come in any order; the suite never checked that order, so no test changes. The library does not change.
+- The suite passes against the v0.4.0 images on all four brokers: locally (linux/arm64 containers on macOS) 905 tests and subtests pass, 82 skip for a missing capability or a known upstream bug, none fail; the Interop workflow passes on amd64 for Mosquitto, HiveMQ CE, EMQX and NanoMQ.
+
+### Documentation
+
+- README.md, INTEROPERABILITY.md and LIMITATIONS.md name sparkplugb-interop v0.4.0.
+
+---
+
 ## v0.3.5
 
 **Date:** 2026-11-12
