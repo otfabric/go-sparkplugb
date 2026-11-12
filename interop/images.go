@@ -5,7 +5,7 @@ package interop
 // InteropRelease is the release of otfabric/sparkplugb-interop the images
 // below come from. Moving to another release means changing these constants;
 // the Interop workflow pins the same references (TestWorkflowPins).
-const InteropRelease = "v0.3.0"
+const InteropRelease = "v0.4.0"
 
 // The reference implementations, as container images that follow the
 // sparkplugb-interop container contract, pinned by digest. The environment
@@ -14,22 +14,22 @@ const InteropRelease = "v0.3.0"
 const (
 	// TahuImage is Eclipse Tahu (Java), edge node and host application.
 	// Override: SPARKPLUGB_INTEROP_TAHU_IMAGE.
-	TahuImage = "ghcr.io/otfabric/sparkplugb-interop-tahu:" + InteropRelease + "@sha256:322127f8be82eb046abd28869eb47de6924b55288ab71fa6b011245d01ae5741"
+	TahuImage = "ghcr.io/otfabric/sparkplugb-interop-tahu:" + InteropRelease + "@sha256:540056d47e9e7e257fbb14a48d7eb80dce5e79a4752acf1a59b4d74a6c40ddfa"
 	// PysparkplugImage is pysparkplug (Python), edge node and host application.
 	// Override: SPARKPLUGB_INTEROP_PYSPARKPLUG_IMAGE.
-	PysparkplugImage = "ghcr.io/otfabric/sparkplugb-interop-pysparkplug:" + InteropRelease + "@sha256:1405e89f83df743b9054cccff289d7c65a873626b104b45341caad3fa98c5855"
+	PysparkplugImage = "ghcr.io/otfabric/sparkplugb-interop-pysparkplug:" + InteropRelease + "@sha256:593281b65453b2eb4dacb57f014f6ab1789a8009927c18bfb207576e7c150993"
 	// SparkplugNetImage is SparkplugNet (C#), edge node and host application.
 	// Override: SPARKPLUGB_INTEROP_SPARKPLUGNET_IMAGE.
-	SparkplugNetImage = "ghcr.io/otfabric/sparkplugb-interop-sparkplugnet:" + InteropRelease + "@sha256:1a0aee704cf01a5b3d39d86201bba40b93e5df12cc5bca94a8bf340dca20a8ee"
+	SparkplugNetImage = "ghcr.io/otfabric/sparkplugb-interop-sparkplugnet:" + InteropRelease + "@sha256:c7b4bc620cb84ee276e93a43b60bb365c71144adfd78775b6454e219071f7dc9"
 	// SradImage is srad (Rust), edge node and host application.
 	// Override: SPARKPLUGB_INTEROP_SRAD_IMAGE.
-	SradImage = "ghcr.io/otfabric/sparkplugb-interop-srad:" + InteropRelease + "@sha256:e56a9188e33845fb634bd5804ff129641b619a353c2d79c2548635d6c532df65"
+	SradImage = "ghcr.io/otfabric/sparkplugb-interop-srad:" + InteropRelease + "@sha256:6617fe6493af987de17d603daf7b10bc406c53e90302b5a2f32774d446c516b0"
 	// TahuJSImage is Eclipse Tahu sparkplug-client (JavaScript), edge node.
 	// Override: SPARKPLUGB_INTEROP_TAHU_JS_IMAGE.
-	TahuJSImage = "ghcr.io/otfabric/sparkplugb-interop-tahu-js:" + InteropRelease + "@sha256:802bc5a2d574c981abf05bf58e077d261b18cf3237b8cfa0c2344441880dc2fb"
+	TahuJSImage = "ghcr.io/otfabric/sparkplugb-interop-tahu-js:" + InteropRelease + "@sha256:c4a5a0c73f84e7c12433335ff8cab4656293f2e87b12866b8736a93dcd850152"
 	// SparkplugHostImage is sparkplughost (Go), host application.
 	// Override: SPARKPLUGB_INTEROP_SPARKPLUGHOST_IMAGE.
-	SparkplugHostImage = "ghcr.io/otfabric/sparkplugb-interop-sparkplughost:" + InteropRelease + "@sha256:5ca0a074f7f8ef7b2480fb53f86151b673991415c10e804ba53168da5c82d807"
+	SparkplugHostImage = "ghcr.io/otfabric/sparkplugb-interop-sparkplughost:" + InteropRelease + "@sha256:87a6d4834c3dc64ddc1e019491d7d798e514890d802220838c0c39a4dc788676"
 )
 
 // There is no default image of go-sparkplugb itself (sparkplugb-interop's
