@@ -17,13 +17,13 @@
 
 ### Documentation
 
-- LIMITATIONS.md: the two cases in which `host` and `app` cannot tell a message of the ending session from one of the new session, which of them this library's edge node rules out (the same millisecond as the NBIRTH, while its clock does not go back) and which remains with any edge node (older, but delivered after the NBIRTH with the `seq` expected next), and how `host` and `app` recover: a rebirth once 2 s pass without an NBIRTH, which restores the state but not the value delivered meanwhile.
+- LIMITATIONS.md: the two cases in which `host` and `app` cannot tell a message of the ending session from one of the new session, which of them this library's edge node rules out (the same millisecond as the NBIRTH, while its clock does not go back) and which remains with any edge node (older, but delivered after the NBIRTH with the `seq` expected next), and how `host` and `app` recover: a rebirth once 2 s pass without an NBIRTH, which restores the state if the edge node answers it, but not the value delivered meanwhile.
 
 ### Tests
 
 - Four goroutines publishing node and device data during a hundred rebirths: every session counts from 0 in order on the wire, no DDATA precedes its DBIRTH, and every NBIRTH is stamped after the message before it. `birthTime` with an injected clock: later, the same millisecond, and a clock that went back.
 - `PahoTransport` against a broker that records the order: a publish with an ended context is not sent, and one whose context ends while paho holds it back keeps its place.
-- `host` and `app`: both cases of a message of the ending session taking the place of the new session's, the value delivered and the rebirth that restores the state.
+- `host` and `app`: both cases of a message of the ending session taking the place of the new session's, the value delivered, the rebirth requested, and the state once the edge node answers it.
 
 ---
 
