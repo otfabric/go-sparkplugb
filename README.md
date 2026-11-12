@@ -48,9 +48,10 @@ MQTT 5. Any other MQTT client plugs in through the `mqtt.Transport` interface.
 
 ## go-sparkplugb vs other Sparkplug B stacks
 
-go-sparkplugb is tested against five other implementations (see the
+go-sparkplugb is tested against six other implementations (see the
 [compatibility matrix](#compatibility-matrix)). All are good libraries; this
-table compares them, to help you pick the right one for your project.
+table compares them, to help you pick the right one for your project (Eclipse
+Tahu's JavaScript client is left out).
 
 | Capability | **otfabric/go-sparkplugb** | Eclipse Tahu (Java) | pysparkplug | SparkplugNet | srad | sparkplughost |
 |---|:---:|:---:|:---:|:---:|:---:|:---:|

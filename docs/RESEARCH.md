@@ -55,8 +55,8 @@ differences:
 | Repository | https://github.com/eclipse-sparkplug/sparkplug |
 | Commit | `e45b610` (Merge pull request #505) |
 | Format | AsciiDoc under `specification/src/main/asciidoc/` |
-| Published PDF | https://www.eclipse.org/tahu/spec/sparkplug_spec.pdf |
-| License | EPL-2.0 (Eclipse Foundation Specification License) |
+| Published PDF | https://sparkplug.eclipse.org/specification/version/3.0/documents/sparkplug-specification-3.0.0.pdf |
+| License | Eclipse Foundation Specification License (the AsciiDoc sources in the repository: EPL-2.0) |
 
 The Sparkplug 3.0 MQTT namespace remains `spBv1.0` (not `spBv3.0`). The "3.0"
 is the specification version; the namespace version identifies the payload
@@ -240,8 +240,8 @@ client layer.
 
 | Project | Spec | License | Edge | Host | TCK |
 |---------|------|---------|------|------|-----|
-| joyautomation/nautilus | 3.0 | AGPL-3.0 | Yes (embedded) | No | Yes (Edge) |
-| weekaung/sparkplugb-client | Partial 3.0 | MIT | Partial | No | No |
+| joyautomation/nautilus | 3.0 | Apache-2.0 | Yes (embedded) | No | Yes (Edge) |
+| weekaung/sparkplugb-client | Partial 3.0 | Apache-2.0 | Partial | No | No |
 | adilbekes/sparkbridge | Partial | MIT | Partial | No | No |
 
 ### Python
@@ -249,14 +249,14 @@ client layer.
 | Project | Spec | License | Edge | Host |
 |---------|------|---------|------|------|
 | pysparkplug | 3.0 | Apache-2.0 | Yes | Partial |
-| mqtt-spb-wrapper | 3.0 | MIT | Yes | Yes |
+| mqtt-spb-wrapper | 3.0 | EPL-2.0 | Yes | Yes |
 
 ### JavaScript/TypeScript
 
 | Project | Spec | License | Edge | Host |
 |---------|------|---------|------|------|
-| node-red-contrib-mqtt-sparkplug-plus | 3.0 | Apache-2.0 | Yes | Yes |
-| joyautomation/synapse | 3.0 | Unknown | Yes | Yes |
+| node-red-contrib-mqtt-sparkplug-plus | 3.0 | ISC | Yes | Yes |
+| joyautomation/synapse | 3.0 | Apache-2.0 | Yes | Yes |
 
 ### Java
 
@@ -275,7 +275,7 @@ client layer.
 
 1. **Eclipse Tahu (Java)** — reference implementation, both roles, EPL-2.0,
    containerizable
-2. **node-red-contrib-mqtt-sparkplug-plus** — both roles, Apache-2.0, has
+2. **node-red-contrib-mqtt-sparkplug-plus** — both roles, ISC, has
    TCK automation
 3. **pysparkplug** — Edge Node, Apache-2.0, pip-installable
 4. **HiveMQtt.Sparkplug (.NET)** — both roles, Apache-2.0, active
@@ -337,7 +337,7 @@ automation.
 
 | Component | License |
 |-----------|---------|
-| Sparkplug specification | EPL-2.0 |
+| Sparkplug specification | Eclipse Foundation Specification License |
 | Eclipse Tahu (including sparkplug_b.proto) | EPL-2.0 |
 | TCK | EPL-2.0 |
 | OT Fabric original code | MIT |

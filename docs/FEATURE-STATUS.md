@@ -16,4 +16,3 @@ Levels: **implemented**, **tested** (this repository), **independently verified*
 | Alias uniqueness across the edge node | tested | `TestAliasUniqueness` |
 | Decode limits (`MaxArrayElements`, `MaxStringBytes`) | tested | `TestDecodeLimits` |
 | MQTT 5 | not implemented | [LIMITATIONS.md](../LIMITATIONS.md) |
-| Complex data in the edge node | not implemented | [LIMITATIONS.md](../LIMITATIONS.md) |

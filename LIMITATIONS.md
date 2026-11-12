@@ -9,12 +9,11 @@ evidence in [INTEROPERABILITY.md](INTEROPERABILITY.md).
 - MQTT 5: the Paho adapter asks for MQTT 3.1.1 and falls back to 3.1 if the broker
   refuses it, so an intentional disconnect does not send DISCONNECT with reason
   code 0x04. `mqtt.Transport` has no way to pass that reason code either.
-- Complex data in the edge node (the optional SendComplexData group of the
-  conformance profile).
 - Host Application multi-broker support is partial: `ServerURLs`, one broker at a
   time.
 - The library does not enforce that NDATA and DDATA metrics are a subset of the
-  birth, nor that metric names appear in births only: that is left to the caller.
+  birth, that metric names appear in births only, nor that a template instance
+  refers to a definition in the NBIRTH: that is left to the caller.
 
 ## Verification
 

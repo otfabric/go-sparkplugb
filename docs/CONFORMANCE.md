@@ -215,7 +215,7 @@ applicable (broker or server requirement).
 | DataSets | Y |
 | Properties | Y |
 | Templates | Y |
-| Complex Data (SendComplexData) | N |
+| Complex Data (SendComplexData) | Y |
 
 ### Sparkplug Host Application (mandatory)
 

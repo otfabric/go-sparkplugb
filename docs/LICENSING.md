@@ -25,7 +25,7 @@ Every original `.go` file carries the header:
 | Title | Eclipse Sparkplug Specification Version 3.0.0 |
 | Repository | https://github.com/eclipse-sparkplug/sparkplug |
 | Commit | `e45b610` |
-| License | EPL-2.0 (Eclipse Foundation Specification License) |
+| License | Eclipse Foundation Specification License (the AsciiDoc sources in the repository: EPL-2.0) |
 | Trademark | "Sparkplug" is a trademark of the Eclipse Foundation |
 
 This library implements the Sparkplug B 3.0.0 specification. Implementing a
