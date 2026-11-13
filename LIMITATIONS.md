@@ -12,8 +12,11 @@ evidence in [INTEROPERABILITY.md](INTEROPERABILITY.md).
 - Host Application multi-broker support is partial: `ServerURLs`, one broker at a
   time.
 - The library does not enforce that NDATA and DDATA metrics are a subset of the
-  birth, that metric names appear in births only, nor that a template instance
-  refers to a definition in the NBIRTH: that is left to the caller.
+  birth, nor that metric names appear in births only: that is left to the
+  caller. The template rules of Sparkplug are enforced
+  ([CONFORMANCE.md](docs/CONFORMANCE.md#templates)): the edge node refuses to
+  publish a template that breaks them, and `host` and `app` log a warning and
+  still apply the message.
 
 ## Verification
 
@@ -44,6 +47,17 @@ stacks, are in [INTEROPERABILITY.md](INTEROPERABILITY.md#on-the-wire).
   what this library refuses.
 - An Int64 or UInt64 in `int_value`, against the specification's `uint64`, is read
   zero-extended: a negative Int64 sent that way reads as a large positive value.
+- Templates are checked by member and parameter name. A template member sent by
+  alias only is not checked against its definition, since the `payload` package
+  has no alias map. An instance is matched to its definition by `template_ref`
+  alone: Sparkplug gives the template version no matching rule, so an instance
+  with another version than its definition is accepted.
+- `host` and `app` report a template that breaks Sparkplug on the `Logger` and
+  apply the message: an edge node's error is not a reason to lose its data, and a
+  rebirth would bring the same NBIRTH.
+- The SparkplugNet 1.4.1 edge node sends an empty `template_ref` with its
+  template definitions: `host` and `app` log a warning for every NBIRTH of such a
+  node ([INTEROPERABILITY.md](INTEROPERABILITY.md#verification-status)).
 - The member of a template instance without a datatype, which data messages may
   have, is `ErrUnknownType` from `GetValue`: the caller has the definition, the
   `payload` package does not. Set its datatype from the definition first.

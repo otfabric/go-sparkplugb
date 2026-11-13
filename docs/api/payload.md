@@ -82,6 +82,23 @@ var (
 ```
 
 ```go
+var (
+	// ErrUnknownTemplate is returned for a template instance whose
+	// template_ref names no template definition of the edge node's NBIRTH
+	// (Sparkplug 3.0.0 tck-id-topics-nbirth-templates,
+	// tck-id-payloads-template-definition-nbirth).
+	ErrUnknownTemplate = errors.New("sparkplugb: unknown template definition")
+	// ErrInvalidTemplate is returned for a template that breaks a rule of
+	// Sparkplug 3.0.0 section 6.4.13 (Template) or 6.4.14 (Template.Parameter):
+	// a definition outside the NBIRTH or with a template_ref, an instance
+	// without is_definition or template_ref, a member or parameter the
+	// definition does not have, or an instance in a birth without all members
+	// of its definition.
+	ErrInvalidTemplate = errors.New("sparkplugb: invalid template")
+)
+```
+
+```go
 var ErrColumnMismatch = errors.New("sparkplugb: column count mismatch")
 ```
 
@@ -157,7 +174,7 @@ func NewDataSet(name string, columns []string, types []pb.DataType, rows [][]any
 
 NewDataSet creates a DataSet metric. columns defines the column names, types the DataType for each column, and rows is a \[]\[]any where each inner slice has one value per column.
 
-A value has the Go type GetValue returns for its column's datatype. For an integer column the wire type, uint32 or uint64, is also taken, as long as it is a value of the column's datatype. A value that is not returns ErrTypeMismatch.
+A value has the Go type GetValue returns for its column's datatype. For an integer column the wire type, uint32 or uint64, is also taken, as long as it is a value of the column's datatype. A value that is not returns ErrTypeMismatch. A column type that is not a basic datatype (Int8 to Text) returns ErrUnknownType.
 
 ### func NewMetric
 
@@ -240,3 +257,29 @@ func StampMetrics(metrics []*pb.Payload_Metric)
 ```go
 type DataType = pb.DataType
 ```
+
+### type TemplateDefs
+
+```go
+type TemplateDefs map[string]*pb.Payload_Template
+```
+
+TemplateDefs are the template definitions of an edge node's NBIRTH, by the name of the metric that carries each one: the names that the template\_ref of an instance refers to. A nil TemplateDefs has no definitions.
+
+Sparkplug gives the version of a template no matching rule, so instances are matched to definitions by template\_ref alone; a version is only checked to be UTF-8.
+
+#### func NewTemplateDefs
+
+```go
+func NewTemplateDefs(nbirth []*pb.Payload_Metric) (TemplateDefs, error)
+```
+
+NewTemplateDefs returns the template definitions of the metrics of an NBIRTH, and checks them and the template instances of the NBIRTH against Sparkplug 3.0.0. The definitions are returned even when the error is not nil, so that a receiver can go on checking the messages that follow: every definition with a metric name is, the first of a name given twice, also one that breaks a rule. The SparkplugNet edge node, for one, sends an empty template\_ref with its definitions, which Sparkplug requires to be omitted: its instances still refer to them. The error wraps ErrInvalidTemplate or ErrUnknownTemplate, and is the first one found.
+
+#### func (TemplateDefs) Check
+
+```go
+func (d TemplateDefs) Check(metrics []*pb.Payload_Metric, birth bool) error
+```
+
+Check checks the template instances in the metrics of a DBIRTH (birth true), NDATA or DDATA (birth false) against the definitions of the NBIRTH: a definition is not allowed outside the NBIRTH, every instance must refer to one of defs, and an instance in a birth must have all members of its definition, one in data a subset. The error wraps ErrInvalidTemplate or ErrUnknownTemplate, and is the first one found.

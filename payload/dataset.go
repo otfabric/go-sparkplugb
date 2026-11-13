@@ -17,7 +17,8 @@ var ErrColumnMismatch = errors.New("sparkplugb: column count mismatch")
 // A value has the Go type GetValue returns for its column's datatype. For an
 // integer column the wire type, uint32 or uint64, is also taken, as long as it
 // is a value of the column's datatype. A value that is not returns
-// ErrTypeMismatch.
+// ErrTypeMismatch. A column type that is not a basic datatype (Int8 to Text)
+// returns ErrUnknownType.
 func NewDataSet(name string, columns []string, types []pb.DataType, rows [][]any) (*pb.Payload_Metric, error) {
 	if len(columns) != len(types) {
 		return nil, ErrColumnMismatch
@@ -25,6 +26,11 @@ func NewDataSet(name string, columns []string, types []pb.DataType, rows [][]any
 
 	typeUints := make([]uint32, len(types))
 	for i, t := range types {
+		// tck-id-payloads-dataset-types-value: a column has a basic datatype,
+		// also in a DataSet without rows.
+		if t < pb.DataType_Int8 || t > pb.DataType_Text {
+			return nil, ErrUnknownType
+		}
 		typeUints[i] = uint32(t)
 	}
 

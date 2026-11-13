@@ -39,7 +39,7 @@ MQTT 5. Any other MQTT client plugs in through the `mqtt.Transport` interface.
 | **Host Application runtime** | STATE birth/death certificates, node/device registry, sequence validation, out-of-order messages held and applied in `seq` order, rebirth requests (at most one pending per node), reorder timeout |
 | **Application runtime** | Non-primary-host consumer: subscribes to spBv1.0/#, tracks nodes/devices, alias resolution, sends NCMD/DCMD — no STATE messages |
 | **Typed metric codec** | All scalar types, signed-integer handling (Int8–Int64 in wire fields), all array types (little-endian packed, bit-packed BooleanArray, null-terminated StringArray, DateTimeArray), quality codes |
-| **Templates** | Template definitions (is_definition, version, member metrics, parameters) and instances (template_ref, parameter overrides) |
+| **Templates** | Template definitions (is_definition, version, member metrics, parameters) and instances (template_ref, parameter overrides); the edge node publishes definitions in the NBIRTH only, and only instances of a definition in it; the host and application report templates that break that |
 | **DataSets** | Columnar data with typed columns (num_of_columns, columns, types, rows), round-trip encode/decode |
 | **Topic namespace** | Parser and builder for `spBv1.0/{group}/{type}/{node}/[{device}]` with validation |
 | **Observability** | Pluggable `Logger` (`log/slog`, standard `log`) and `Metrics` callbacks per role; `context.Context` on every blocking call |

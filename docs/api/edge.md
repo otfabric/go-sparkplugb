@@ -108,6 +108,9 @@ type Node struct {
 
 	// Birth state for auto-rebirth
 
+	// templates are the template definitions of the last NBIRTH: the
+	// instances of later messages must refer to them.
+
 	// Server walking
 
 	// hostOnlineTS is the timestamp of the latest online STATE of the

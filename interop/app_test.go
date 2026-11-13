@@ -44,6 +44,7 @@ func runApplication(t *testing.T, w *world, a adapter, fxName string) {
 	ap, err := app.New(mqtt.NewPahoTransport(), app.Config{
 		BrokerURL: w.url,
 		ClientID:  uniqueName("app"),
+		Logger:    newTemplateCheck(t, edgeNode),
 		OnNodeBirth: func(_, n string, _ []*pb.Payload_Metric) {
 			if mine(n) {
 				rec.add("NBIRTH")

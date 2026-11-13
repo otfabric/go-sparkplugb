@@ -83,6 +83,7 @@ func newLibHost(t *testing.T, w *world, hostID, edgeNode string) (*host.App, *re
 		HostID:    hostID,
 		BrokerURL: w.url,
 		ClientID:  uniqueName("host"),
+		Logger:    newTemplateCheck(t, edgeNode),
 		OnNodeBirth: func(_, n string, _ []*pb.Payload_Metric) {
 			if mine(n) {
 				rec.add("NBIRTH")
@@ -128,6 +129,62 @@ func newLibHost(t *testing.T, w *world, hostID, edgeNode string) (*host.App, *re
 		_ = h.Close(ctx)
 	})
 	return h, rec, tr
+}
+
+// templateCheck is the Logger of a go-sparkplugb host or application: it
+// fails the test when the library reports a template of edgeNode that breaks
+// Sparkplug 3.0.0, an instance of a definition the NBIRTH does not have above
+// all (tck-id-topics-nbirth-templates). The other lines are dropped.
+type templateCheck struct {
+	mu    sync.Mutex
+	node  string
+	found []string
+}
+
+// knownTemplateDeviations are the template rules a pinned reference edge node
+// breaks: go-sparkplugb reports them, and the test logs them instead of failing.
+var knownTemplateDeviations = []struct {
+	adapter, version, report, why string
+}{
+	{"sparkplugnet", "1.4.1", "has a template_ref",
+		"PayloadConverter writes Template.TemplateRef, an empty string by default, into every template: a definition carries template_ref \"\", which Sparkplug requires to be omitted (tck-id-payloads-template-definition-ref)"},
+}
+
+// newTemplateCheck returns the templateCheck of edgeNode, whose name ends in
+// "-" and the name of its adapter.
+func newTemplateCheck(t *testing.T, edgeNode string) *templateCheck {
+	l := &templateCheck{node: edgeNode}
+	t.Cleanup(func() {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+	next:
+		for _, w := range l.found {
+			for _, d := range knownTemplateDeviations {
+				if strings.HasSuffix(edgeNode, "-"+d.adapter) && strings.Contains(w, d.report) {
+					t.Logf("known deviation of %s %s: %s (%s)", d.adapter, d.version, w, d.why)
+					continue next
+				}
+			}
+			t.Errorf("go-sparkplugb reported an invalid template: %s", w)
+		}
+	})
+	return l
+}
+
+func (l *templateCheck) Debugf(string, ...any) {}
+func (l *templateCheck) Infof(string, ...any)  {}
+func (l *templateCheck) Errorf(string, ...any) {}
+func (l *templateCheck) Warnf(format string, args ...any) {
+	s := fmt.Sprintf(format, args...)
+	if !strings.Contains(s, "sparkplugb: unknown template definition") && !strings.Contains(s, "sparkplugb: invalid template") {
+		return
+	}
+	if !strings.Contains(s, "/"+l.node+":") && !strings.Contains(s, "/"+l.node+"/") {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.found = append(l.found, s)
 }
 
 // hostState is what a go-sparkplugb host or application knows about an edge

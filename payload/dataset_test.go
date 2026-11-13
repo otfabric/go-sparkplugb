@@ -3,6 +3,7 @@
 package payload
 
 import (
+	"errors"
 	"testing"
 
 	pb "github.com/otfabric/go-sparkplugb/proto"
@@ -243,5 +244,18 @@ func TestNewDataSetValueAllMismatches(t *testing.T) {
 		if err != ErrTypeMismatch {
 			t.Errorf("dt=%v: expected ErrTypeMismatch, got %v", tc.dt, err)
 		}
+	}
+}
+
+// tck-id-payloads-dataset-types-value: the column types are basic datatypes,
+// checked also when there are no rows to encode.
+func TestNewDataSetColumnTypeNotBasic(t *testing.T) {
+	for _, dt := range []pb.DataType{pb.DataType_Unknown, pb.DataType_DataSet, pb.DataType_Template, pb.DataType_Int8Array} {
+		if _, err := NewDataSet("t", []string{"c"}, []pb.DataType{dt}, nil); !errors.Is(err, ErrUnknownType) {
+			t.Errorf("%v: %v", dt, err)
+		}
+	}
+	if _, err := NewDataSet("t", []string{"c"}, []pb.DataType{pb.DataType_DateTime}, nil); err != nil {
+		t.Errorf("DateTime: %v", err)
 	}
 }
