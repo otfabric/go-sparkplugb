@@ -212,11 +212,7 @@ func (a *App) abortConnect(ctx context.Context, birthSent bool, err error) error
 	if a.state != Closed {
 		a.setState(Disconnected)
 	}
-	for k, t := range a.reorderTimers {
-		t.Stop()
-		delete(a.reorderTimers, k)
-	}
-	a.stopSessionTimers()
+	a.stopTimers()
 	a.mu.Unlock()
 
 	ctx = context.WithoutCancel(ctx)
@@ -235,11 +231,7 @@ func (a *App) Disconnect(ctx context.Context) error {
 		return nil
 	}
 	a.setState(Disconnected)
-	for k, t := range a.reorderTimers {
-		t.Stop()
-		delete(a.reorderTimers, k)
-	}
-	a.stopSessionTimers()
+	a.stopTimers()
 	a.mu.Unlock()
 
 	ts := time.Now().UnixMilli()
@@ -377,11 +369,7 @@ func (a *App) onConnectionLost(err error) {
 		return
 	}
 	a.cfg.Logger.Warnf("transport lost: %v", err)
-	for k, t := range a.reorderTimers {
-		t.Stop()
-		delete(a.reorderTimers, k)
-	}
-	a.stopSessionTimers()
+	a.stopTimers()
 	a.setState(Disconnected)
 }
 
@@ -575,8 +563,13 @@ func (a *App) expectSession(t topic.Topic) {
 	})
 }
 
-// stopSessionTimers ends every wait for a NBIRTH. Called with a.mu held.
-func (a *App) stopSessionTimers() {
+// stopTimers ends every pending rebirth request: the waits for a missing
+// sequence number and the waits for a NBIRTH. Called with a.mu held.
+func (a *App) stopTimers() {
+	for k, t := range a.reorderTimers {
+		t.Stop()
+		delete(a.reorderTimers, k)
+	}
 	for k, t := range a.sessionTimers {
 		t.Stop()
 		delete(a.sessionTimers, k)
