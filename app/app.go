@@ -104,14 +104,15 @@ type Application struct {
 	nodes   map[string]*EdgeNodeState
 	closeCh chan struct{}
 
-	rebirthAsked  map[string]time.Time   // nodeKey -> last rebirth request the application made itself
-	rebirthMissed map[string]bool        // nodeKey -> a request was throttled while one was pending
-	deaths        map[string]death       // nodeKey -> last NDEATH
-	held          map[string][]heldMsg   // nodeKey -> messages ahead of their sequence
-	sessions      map[string]*session    // nodeKey -> current session
-	sessionTimers map[string]*time.Timer // nodeKey -> pending wait for an NBIRTH
-	sessionWait   time.Duration          // sessionWait, shorter in tests
-	lateBirthWait time.Duration          // lateBirthWait, shorter in tests
+	rebirthAsked  map[string]time.Time            // nodeKey -> last rebirth request the application made itself
+	rebirthMissed map[string]bool                 // nodeKey -> a request was throttled while one was pending
+	deaths        map[string]death                // nodeKey -> last NDEATH
+	held          map[string][]heldMsg            // nodeKey -> messages ahead of their sequence
+	sessions      map[string]*session             // nodeKey -> current session
+	templates     map[string]payload.TemplateDefs // nodeKey -> template definitions of the NBIRTH
+	sessionTimers map[string]*time.Timer          // nodeKey -> pending wait for an NBIRTH
+	sessionWait   time.Duration                   // sessionWait, shorter in tests
+	lateBirthWait time.Duration                   // lateBirthWait, shorter in tests
 }
 
 func New(transport mqtt.Transport, cfg Config) (*Application, error) {
@@ -631,6 +632,12 @@ func (a *Application) handleNBIRTH(t topic.Topic, data []byte) {
 		a.logWarn("decode NBIRTH from %s/%s: %v", t.GroupID, t.EdgeNodeID, err)
 		return
 	}
+	// A template that breaks Sparkplug is reported, and the NBIRTH is still
+	// applied: the invalid definitions are left out of templates.
+	templates, err := payload.NewTemplateDefs(p.Metrics)
+	if err != nil {
+		a.logWarn("NBIRTH from %s/%s: %v", t.GroupID, t.EdgeNodeID, err)
+	}
 
 	a.mu.Lock()
 	if late, died := a.lateBirth(t, p); late {
@@ -665,6 +672,10 @@ func (a *Application) handleNBIRTH(t topic.Topic, data []byte) {
 		}
 	}
 	a.nodes[key] = ns
+	if a.templates == nil {
+		a.templates = make(map[string]payload.TemplateDefs)
+	}
+	a.templates[key] = templates
 	if a.sessions == nil {
 		a.sessions = make(map[string]*session)
 	}
@@ -769,6 +780,9 @@ func (a *Application) handleDBIRTH(t topic.Topic, data []byte) {
 			a.mu.Unlock()
 			return
 		}
+		if err := a.templates[nodeKey(t.GroupID, t.EdgeNodeID)].Check(p.Metrics, true); err != nil {
+			a.logWarn("DBIRTH from %s/%s/%s: %v", t.GroupID, t.EdgeNodeID, t.DeviceID, err)
+		}
 		ds := &DeviceState{
 			DeviceID: t.DeviceID,
 			Online:   ns.Online,
@@ -836,6 +850,9 @@ func (a *Application) handleNDATA(t topic.Topic, data []byte) {
 			a.mu.Unlock()
 			return
 		}
+		if err := a.templates[nodeKey(t.GroupID, t.EdgeNodeID)].Check(p.Metrics, false); err != nil {
+			a.logWarn("NDATA from %s/%s: %v", t.GroupID, t.EdgeNodeID, err)
+		}
 		for _, m := range p.Metrics {
 			name := resolveMetricName(ns, m)
 			if name != "" {
@@ -866,6 +883,9 @@ func (a *Application) handleDDATA(t topic.Topic, data []byte) {
 		if !a.validateSeq(ns, p.GetSeq(), t) {
 			a.mu.Unlock()
 			return
+		}
+		if err := a.templates[nodeKey(t.GroupID, t.EdgeNodeID)].Check(p.Metrics, false); err != nil {
+			a.logWarn("DDATA from %s/%s/%s: %v", t.GroupID, t.EdgeNodeID, t.DeviceID, err)
 		}
 		if ds, ok := ns.Devices[t.DeviceID]; ok {
 			for _, m := range p.Metrics {

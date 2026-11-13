@@ -86,6 +86,7 @@ or `uint64`: it is checked by the table above and written in the form above.
 | Any of the rebirth requests above | One pending per node: the next waits for the NBIRTH or 2 seconds, however many messages are out of order |
 | NDEATH whose `bdSeq` is not the birth's | Ignored: it is the will of an earlier session, which a broker may deliver late |
 | Data metric with only an alias | Stored by the name and datatype of its birth |
+| A template that breaks Sparkplug: a definition outside the NBIRTH or with a `template_ref`, an instance of a definition the NBIRTH does not have, a member or parameter the definition lacks, a birth instance without all members | A warning on the `Logger`, and the message is applied and delivered. A definition is kept even when it breaks a rule, so that its instances are still checked against it |
 | `GetNode`, `Nodes` | Return copies, safe to read while messages arrive |
 
 ## Verification status
@@ -114,6 +115,15 @@ against its edge. The suite checks the form of each Int8 and Int16 on the wire, 
 each of those places. On the SparkplugNet host, properties are not compared, and
 UInt32 DataSet cells neither: it drops the first and reads the second from
 `long_value` only, where the library writes `int_value` as the specification says.
+The host and application fail the test on any template the library reports as
+breaking Sparkplug (`templateCheck` in `interop/host_test.go`), except one known
+deviation: SparkplugNet's edge sends its template definitions with an empty
+`template_ref`, which Sparkplug requires to be omitted
+(tck-id-payloads-template-definition-ref). The library warns about it and keeps
+the definition, so the instances that refer to it are accepted. The Tahu and
+tahu-js edges send their templates as Sparkplug requires, and the library's edge
+passes its template checks on every fixture it serves to the Tahu, SparkplugNet
+and sparkplughost hosts.
 
 ¹ pysparkplug's NDEATH on a clean stop carries `bdSeq + 1`, so the
 node does not go offline on it; the will after a crash is checked instead.

@@ -125,6 +125,9 @@ type Node struct {
 
 	// Birth state for auto-rebirth
 	birthMetrics []*pb.Payload_Metric
+	// templates are the template definitions of the last NBIRTH: the
+	// instances of later messages must refer to them.
+	templates payload.TemplateDefs
 
 	// Server walking
 	serverIdx int
@@ -307,6 +310,14 @@ func (n *Node) publishBirth(ctx context.Context, nodeMetrics []*pb.Payload_Metri
 		n.mu.Unlock()
 		return err
 	}
+	// Template instances of this node and its devices refer to the
+	// definitions of this NBIRTH (tck-id-topics-nbirth-templates).
+	templates, err := payload.NewTemplateDefs(nodeMetrics)
+	if err != nil {
+		n.mu.Unlock()
+		return err
+	}
+	n.templates = templates
 	n.seq = 0
 	n.born = true
 	n.aliases = make(map[uint64]string)
@@ -383,6 +394,10 @@ func (n *Node) publishDeviceBirth(ctx context.Context, deviceID string, metrics 
 		n.mu.Unlock()
 		return err
 	}
+	if err := n.templates.Check(metrics, true); err != nil {
+		n.mu.Unlock()
+		return err
+	}
 
 	if _, exists := n.devices[deviceID]; !exists {
 		n.devices[deviceID] = &Device{ID: deviceID}
@@ -443,6 +458,10 @@ func (n *Node) publishNodeData(ctx context.Context, metrics []*pb.Payload_Metric
 		n.mu.Unlock()
 		return ErrNoBirth
 	}
+	if err := n.templates.Check(metrics, false); err != nil {
+		n.mu.Unlock()
+		return err
+	}
 	n.birthMetrics = n.withCurrent(n.birthMetrics, metrics)
 	n.seq = (n.seq + 1) % 256
 	seq := n.seq
@@ -464,6 +483,10 @@ func (n *Node) publishDeviceData(ctx context.Context, deviceID string, metrics [
 	if !n.born {
 		n.mu.Unlock()
 		return ErrNoBirth
+	}
+	if err := n.templates.Check(metrics, false); err != nil {
+		n.mu.Unlock()
+		return err
 	}
 	if dev, ok := n.devices[deviceID]; ok {
 		dev.Metrics = n.withCurrent(dev.Metrics, metrics)
@@ -726,7 +749,9 @@ const rebirthMetricName = "Node Control/Rebirth"
 // withCurrent returns the birth metrics with the values of the data metrics
 // that name them, by name or by alias, so that a rebirth publishes current
 // values as Sparkplug requires. The birth keeps its names, aliases and
-// datatypes; neither slice is modified. Called with n.mu held.
+// datatypes; neither slice is modified. A template instance in data may have
+// a subset of its members: the birth keeps the others, since an instance in a
+// birth must have all of them. Called with n.mu held.
 func (n *Node) withCurrent(birth, data []*pb.Payload_Metric) []*pb.Payload_Metric {
 	out := make([]*pb.Payload_Metric, len(birth))
 	copy(out, birth)
@@ -741,7 +766,41 @@ func (n *Node) withCurrent(birth, data []*pb.Payload_Metric) []*pb.Payload_Metri
 			}
 			c := proto.Clone(d).(*pb.Payload_Metric)
 			c.Name, c.Alias, c.Datatype = b.Name, b.Alias, b.Datatype
+			if bt, dt := b.GetTemplateValue(), c.GetTemplateValue(); bt != nil && dt != nil {
+				c.Value = &pb.Payload_Metric_TemplateValue{TemplateValue: mergeTemplate(bt, dt)}
+			}
 			out[i] = c
+		}
+	}
+	return out
+}
+
+// mergeTemplate returns the birth instance b with the members and parameters
+// that data instance d has, by name; a member without a datatype takes the
+// one of b. Members that are templates are merged the same way. b and d are
+// not modified.
+func mergeTemplate(b, d *pb.Payload_Template) *pb.Payload_Template {
+	out := proto.Clone(b).(*pb.Payload_Template)
+	for _, dm := range d.GetMetrics() {
+		for i, bm := range out.Metrics {
+			if dm.GetName() == "" || bm.GetName() != dm.GetName() {
+				continue
+			}
+			c := proto.Clone(dm).(*pb.Payload_Metric)
+			if c.Datatype == nil {
+				c.Datatype = bm.Datatype
+			}
+			if bt, dt := bm.GetTemplateValue(), c.GetTemplateValue(); bt != nil && dt != nil {
+				c.Value = &pb.Payload_Metric_TemplateValue{TemplateValue: mergeTemplate(bt, dt)}
+			}
+			out.Metrics[i] = c
+		}
+	}
+	for _, dp := range d.GetParameters() {
+		for i, bp := range out.Parameters {
+			if bp.GetName() == dp.GetName() {
+				out.Parameters[i] = proto.Clone(dp).(*pb.Payload_Template_Parameter)
+			}
 		}
 	}
 	return out

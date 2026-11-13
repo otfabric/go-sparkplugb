@@ -29,6 +29,7 @@ type Application struct {
 	// nodeKey -> last NDEATH
 	// nodeKey -> messages ahead of their sequence
 	// nodeKey -> current session
+	// nodeKey -> template definitions of the NBIRTH
 	// nodeKey -> pending wait for an NBIRTH
 	// sessionWait, shorter in tests
 	// lateBirthWait, shorter in tests

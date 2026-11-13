@@ -1,5 +1,36 @@
 # go-sparkplugb Releases
 
+## v0.4.0
+
+**Date:** 2026-11-13
+**Previous release:** v0.3.6
+
+### Added
+
+- **`payload.NewTemplateDefs` and `TemplateDefs.Check`** check the templates of a node's messages against Sparkplug 3.0.0 sections 6.4.13–6.4.14 and tck-id-topics-nbirth-templates: definitions only in the NBIRTH, with `is_definition` true and no `template_ref`; every instance with `is_definition` false and a `template_ref` naming a definition of the NBIRTH; only members and parameters of its definition, and in a birth every member; versions, references and parameter names UTF-8; parameters of a definition with a name and a basic type. Nested instances are checked too. Errors wrap the new sentinels **`payload.ErrUnknownTemplate`** (no such definition in the NBIRTH) and **`payload.ErrInvalidTemplate`** (any other rule). The template version has no matching rule in Sparkplug and is not compared.
+
+### Changed
+
+- **`edge`: a message whose templates break those rules is not published.** `PublishBirth`, `PublishDeviceBirth`, `PublishNodeData` and `PublishDeviceData` return the error, take no `seq` and change no state; until now an edge node could publish an instance of a definition its NBIRTH did not have, or a definition in a DBIRTH or data message. A caller that did must now put its definitions in the NBIRTH.
+- **`host` and `app` log a warning for a received template that breaks the rules,** naming the node, the message type and the template, and still apply and deliver the message. A definition that breaks a rule is kept, so its instances are still checked against it: the SparkplugNet 1.4.1 edge node sends an empty `template_ref` with its definitions, which Sparkplug requires to be omitted.
+- **`payload.NewDataSet` returns `ErrUnknownType` for a column type that is not basic** (Int8 to Text, tck-id-payloads-dataset-types-value), also when the DataSet has no rows; such a type was accepted before when no row needed encoding.
+
+### Fixed
+
+- **`edge`: a rebirth after data with some of a template instance's members published the instance with only those members.** The stored birth took the data metric as a whole; it now takes the members and parameters the data has and keeps the others, with their datatypes, as an instance in a birth must have every member of its definition (tck-id-payloads-template-instance-members-birth).
+
+### Documentation
+
+- docs/CONFORMANCE.md lists every template, DataSet and PropertySet requirement of Sparkplug 3.0.0 with its TCK ID and status, and what `SendComplexDataTest` checks: its template checks are payload-level, the NBIRTH rules are checked by the TCK's `SendDataTest` and monitor, and three of its requirements are the caller's (alias-only data metrics, no datatype in data, quality values). The quality value 0, 192 or 500 is P: `SetQuality` takes any `int32`. "Complex Data" stays Y, as implemented; the TCK has not been run.
+- LIMITATIONS.md, ERRORS.md, API.md, INTEROPERABILITY.md, docs/FEATURE-STATUS.md and the README describe the template checks, how `host` and `app` report them, and the SparkplugNet deviation.
+
+### Tests
+
+- Unit tests for every rule, valid and malformed, nested instances, by-alias data, the edge refusals (nothing published, no `seq` taken), the rebirth merge, and the host and application warnings; `FuzzTemplateDefs`.
+- The interop host and application fail on a template warning, with SparkplugNet's empty `template_ref` recorded as a known deviation. Locally (linux/arm64 containers on macOS, sparkplugb-interop v0.4.0) 856 tests and subtests pass and 82 skip for a missing capability or a known upstream bug; 12 application runs on HiveMQ CE and one on EMQX failed because the broker container did not come up in time on the shared Docker host, and pass on a rerun of the application tests on those two brokers (115 pass, none fail).
+
+---
+
 ## v0.3.6
 
 **Date:** 2026-11-12

@@ -34,6 +34,7 @@ applicable (broker or server requirement).
 | NCMD: QoS 0, not retained | tck-id-topics-ncmd-mqtt | Y | host package |
 | DCMD: QoS 0, not retained | tck-id-topics-dcmd-mqtt | Y | host package |
 | STATE: QoS 1, retained | tck-id-topics-state-mqtt | Y | host package |
+| All template definitions of the instances of the edge node and its devices in the NBIRTH | tck-id-topics-nbirth-templates | Y | `edge` refuses the message with `payload.ErrUnknownTemplate`; `host` and `app` log a warning ([Templates](#templates)) |
 
 ---
 
@@ -161,26 +162,53 @@ applicable (broker or server requirement).
 
 ### Templates
 
+Sparkplug 3.0.0 section 6.4.13 (Template) and 6.4.14 (Template.Parameter).
+**Edge** is what `edge.Node` checks before it publishes: a message that breaks
+the rule is not published, and its error wraps `payload.ErrInvalidTemplate` or
+`payload.ErrUnknownTemplate`. **Host** is what `host` and `app` check on
+receipt: a warning on the `Logger`, and the message is still applied and
+delivered. Both use `payload.NewTemplateDefs` and `TemplateDefs.Check`
+(payload/templatecheck.go), which a caller can also use.
+
 | Requirement | TCK ID | Status | Notes |
 |------------|--------|--------|-------|
-| Template definition: is_definition=true, version | — | Y | payload/template.go |
-| Template instance: template_ref set | — | Y | payload/template.go |
-| Parameters on instances | — | Y | payload/template.go |
+| Definitions only in the NBIRTH | tck-id-payloads-template-definition-nbirth-only | Y | Edge and host: a definition in a DBIRTH, NDATA or DDATA |
+| A definition has is_definition=true | tck-id-payloads-template-definition-is-definition, tck-id-payloads-template-is-definition-definition | Y | `NewTemplateDefinition` sets it; a template without it is taken for an instance |
+| A definition omits template_ref | tck-id-payloads-template-definition-ref, tck-id-payloads-template-ref-definition | Y | Edge and host |
+| A definition has all members its instances will have | tck-id-payloads-template-definition-members | Y | Checked as its converse: an instance member the definition lacks |
+| The NBIRTH has the definition of every instance in the NBIRTH and DBIRTHs | tck-id-payloads-template-definition-nbirth | Y | Edge and host, `ErrUnknownTemplate`; also for NDATA and DDATA, and for instances nested in members |
+| A definition has all parameters its instances will have | tck-id-payloads-template-definition-parameters | Y | Checked as its converse: an instance parameter the definition lacks |
+| A definition may give parameter defaults | tck-id-payloads-template-definition-parameters-default | Y | MAY; `NewTemplateParameter` always sets a value |
+| An instance has is_definition=false | tck-id-payloads-template-instance-is-definition, tck-id-payloads-template-is-definition-instance | Y | `NewTemplateInstance` sets it |
+| is_definition in every template | tck-id-payloads-template-is-definition | Y | Edge and host: a template without it is an invalid instance |
+| An instance's template_ref names the definition's metric | tck-id-payloads-template-instance-ref, tck-id-payloads-template-ref-instance | Y | Edge and host: missing, empty, not UTF-8, or no such definition |
+| An instance has only members of its definition | tck-id-payloads-template-instance-members | Y | Edge and host, by member name; a member by alias only is not checked |
+| An instance in an NBIRTH or DBIRTH has all members of its definition | tck-id-payloads-template-instance-members-birth | Y | Edge and host. A rebirth after data with some members keeps the others (`withCurrent`) |
+| An instance in NDATA or DDATA may have a subset | tck-id-payloads-template-instance-members-data | Y | |
+| An instance may have parameters of its definition | tck-id-payloads-template-instance-parameters | Y | A parameter the definition lacks is refused |
+| version, if present, is UTF-8 | tck-id-payloads-template-version | Y | Sparkplug gives the version no matching rule: an instance is matched to its definition by template_ref only, whatever the versions |
+| Parameter name in every parameter definition, UTF-8 | tck-id-payloads-template-parameter-name-required, tck-id-payloads-template-parameter-name-type | Y | Name required in definitions; UTF-8 everywhere |
+| Parameter type: a basic datatype, uint32; required in definitions | tck-id-payloads-template-parameter-value-type, tck-id-payloads-template-parameter-type-value, tck-id-payloads-template-parameter-type-req | Y | Int8 to Text; `NewTemplateParameter` refuses others with `ErrUnknownType` |
+| Parameter value: uint32, uint64, float, double, bool or string | tck-id-payloads-template-parameter-value | Y | Protobuf oneof; integers per [Integers](../INTEROPERABILITY.md#integers) |
 
 ### DataSets
 
 | Requirement | TCK ID | Status | Notes |
 |------------|--------|--------|-------|
-| num_of_columns, columns, types, rows | — | Y | payload/dataset.go |
-| DataSetValue typed per column | — | Y | payload/dataset.go |
+| num_of_columns: uint64, the column count | tck-id-payloads-dataset-column-size | Y | `NewDataSet` sets it |
+| columns and types have the same count | tck-id-payloads-dataset-column-num-headers, tck-id-payloads-dataset-types-num | Y | `NewDataSet` and `GetDataSetValues` return `ErrColumnMismatch` |
+| types: uint32 basic datatypes, always present | tck-id-payloads-dataset-types-def, tck-id-payloads-dataset-types-type, tck-id-payloads-dataset-types-value, tck-id-payloads-dataset-parameter-type-req | Y | `NewDataSet` refuses a type outside Int8 to Text with `ErrUnknownType`, also without rows |
+| DataSetValue: uint32, uint64, float, double, bool or string | tck-id-payloads-template-dataset-value | Y | payload/dataset.go |
 
 ### PropertySets
 
 | Requirement | TCK ID | Status | Notes |
 |------------|--------|--------|-------|
-| PropertySet: keys[] + values[] | — | Y | Proto fields available |
+| keys and values have the same count | tck-id-payloads-propertyset-keys-array-size, tck-id-payloads-propertyset-values-array-size | Y | `SetQuality` keeps them paired; a PropertySet built by the caller is the caller's |
+| PropertyValue type: uint32, a basic datatype or PropertySet/PropertySetList; required in births | tck-id-payloads-metric-propertyvalue-type-type, tck-id-payloads-metric-propertyvalue-type-value, tck-id-payloads-metric-propertyvalue-type-req | Y | `NewPropertyValue` sets it |
 | PropertySetList: repeated PropertySet | — | Y | Proto fields available |
-| PropertyValue type + is_null | — | Y | Proto fields available |
+| Quality: type Int32 (3), int_value | tck-id-payloads-propertyset-quality-value-type | Y | `SetQuality` |
+| Quality: one of 0, 192, 500 | tck-id-payloads-propertyset-quality-value-value | P | `SetQuality` takes any int32: the value is the caller's |
 
 ---
 
@@ -216,6 +244,20 @@ applicable (broker or server requirement).
 | Properties | Y |
 | Templates | Y |
 | Complex Data (SendComplexData) | Y |
+
+Complex Data is the TCK's `SendComplexDataTest`. It checks the DataSet,
+Template and PropertySet requirements above, together with the requirements
+on every edge node message it sees: a seq, timestamps and names, datatypes in
+births. Its template checks are payload-level; the TCK checks that an instance
+refers to a definition of the NBIRTH in `SendDataTest`
+(tck-id-payloads-template-definition-nbirth) and in its monitor
+(tck-id-topics-nbirth-templates). Y means implemented: the TCK has not been
+run. Three of the requirements it checks depend on the metrics the caller
+gives the edge node, which publishes them as they are: NDATA and DDATA with
+aliases carry the alias only (tck-id-payloads-alias-data-cmd-requirement,
+`payload.NewAliasMetric`), data metrics without a datatype
+(tck-id-payloads-metric-datatype-not-req, a SHOULD), and quality values of 0,
+192 or 500.
 
 ### Sparkplug Host Application (mandatory)
 

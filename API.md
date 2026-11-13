@@ -19,7 +19,7 @@ All three runtimes take a transport and a `Config`: `New(transport, cfg)`, then 
 
 `New` validates required fields and refuses a `Password` without a `Username`.
 
-An edge node goes through `PublishBirth`, `PublishDeviceBirth`, then `PublishNodeData`, `PublishDeviceData` and `PublishDeviceDeath`. Data before the birth returns `ErrNoBirth`. Aliases must be unique across the node: a birth that breaks that returns `ErrDuplicateID`.
+An edge node goes through `PublishBirth`, `PublishDeviceBirth`, then `PublishNodeData`, `PublishDeviceData` and `PublishDeviceDeath`. Data before the birth returns `ErrNoBirth`. Aliases must be unique across the node: a birth that breaks that returns `ErrDuplicateID`. Template definitions go in the NBIRTH only, and every template instance of the node and its devices refers to one of them: a message that breaks that returns `payload.ErrUnknownTemplate` or `payload.ErrInvalidTemplate` and is not published. `payload.NewTemplateDefs` and `TemplateDefs.Check` do the same check for a caller; `host` and `app` use them on receipt and log what breaks it.
 
 ## Custom transports
 
