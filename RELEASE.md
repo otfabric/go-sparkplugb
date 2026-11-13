@@ -1,5 +1,22 @@
 # go-sparkplugb Releases
 
+## v0.4.2
+
+**Date:** 2026-11-13
+**Previous release:** v0.4.1
+
+### Fixed
+
+- **`edge`, `host`, `app`: a `Connect` that fails after the CONNACK closes the connection.** When a subscription failed, or the host's STATE birth could not be published, `Connect` returned the error with the connection still up: its will armed, the runtime left in `Subscribing`, `WaitingForPrimaryHost` or `Connecting`, and the next `Connect` opened a second connection beside it. The connection is now closed with a DISCONNECT and the state is `Disconnected`, so `Connect` can be called again. A DISCONNECT discards the will, so when the host's STATE birth may have reached the broker, the host publishes its STATE death first: edge nodes would otherwise keep its retained STATE online. The edge node published no NBIRTH on such a connection and owes no NDEATH.
+- **`app`: the default client ID is random.** An application without `ClientID` took `sparkplug_app_` and the clock in nanoseconds modulo 100000: two applications had 1 chance in 100000 of the same ID, and a broker disconnects a client when another connects with its ID (MQTT 3.1.1, MQTT-3.1.4-2), so they took each other over. The default is now `sparkplug_app_` and 8 hex digits from `crypto/rand`, 22 bytes.
+
+### Tests
+
+- `edge`, `host`, `app`: each failing step after the CONNACK leaves the runtime `Disconnected` with the connection closed, publishes nothing on it, or the STATE death after a failed STATE birth, and a second `Connect` succeeds.
+- `app`: the default client ID has its format, differs between applications, and a configured one is kept.
+
+---
+
 ## v0.4.1
 
 **Date:** 2026-11-13

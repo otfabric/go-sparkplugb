@@ -368,7 +368,7 @@ carry the alias only, and `ResolveAlias` maps it back.
 | `BrokerURL` | `string` | | MQTT broker URL |
 | `ServerURLs` | `[]string` | | Multiple broker URLs (fallback) |
 | `Username`, `Password` | `string` | | Broker login, for every server. A `Password` needs a `Username`. Never logged; use `ssl://` |
-| `ClientID` | `string` | `sparkplug_app_<n>` | MQTT client ID |
+| `ClientID` | `string` | `sparkplug_app_` and 8 random hex digits | MQTT client ID |
 | `Logger` | `sparkplugb.Logger` | none | Logger |
 | `Metrics` | `app.Metrics` | none | Connect, message, state-change, node birth and death callbacks |
 | `OnState` | `func` | | State change callback |
