@@ -405,6 +405,17 @@ func TestBooleanArrayTooLarge(t *testing.T) {
 	}
 }
 
+// A count with the top bit set is too large on every platform, also where int
+// is 32 bits wide and the count would otherwise turn negative.
+func TestBooleanArrayCountHighBit(t *testing.T) {
+	for _, count := range []uint32{1 << 31, math.MaxUint32} {
+		data := []byte{byte(count), byte(count >> 8), byte(count >> 16), byte(count >> 24), 0xFF}
+		if _, err := decodeBooleanArray(data); err != ErrArrayTooLarge {
+			t.Errorf("count %#x: expected ErrArrayTooLarge, got %v", count, err)
+		}
+	}
+}
+
 func TestGetQualityNoProperties(t *testing.T) {
 	m := &pb.Payload_Metric{}
 	_, ok := GetQuality(m)

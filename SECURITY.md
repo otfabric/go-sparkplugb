@@ -48,6 +48,10 @@ targets (`make fuzz`).
 | Connect timeout (`PahoTransport`) | 10 s | `ConnectTimeout` |
 | Publish and subscribe timeout (`PahoTransport`) | 5 s | `PublishTimeout` |
 
+## Static analysis
+
+Gosec and Opengrep scans run on a maintainer's machine before each release, with `cd ../engineering && make sast REPO=go-sparkplugb` and `sast/scan.sh scan go-sparkplugb --module-dir interop` for the interop module, from a checkout of otfabric/engineering beside this one ([ADR-0011](https://github.com/otfabric/engineering/blob/main/docs/adr/0011-shared-sast.md)), never in a GitHub workflow, so that a public CI log does not publish a finding before it is fixed. Findings are fixed in code: no `//nolint` or `#nosec`. The accepted findings, the integer conversions of the Sparkplug wire encodings (a signed integer carried in an unsigned field, the datatype in a `uint32`, each decoded value range-checked before it is narrowed) and `math/rand/v2` for reconnect jitter, are recorded in the organisation's private triage, not in this repository. A clean scan is not a proof that no weakness is left.
+
 ## Known security limitations
 
 - No library limit on the size of a received payload: `payload.Decode` takes what

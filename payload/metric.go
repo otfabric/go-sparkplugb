@@ -494,10 +494,13 @@ func decodeBooleanArray(b []byte) ([]bool, error) {
 	if len(b) < 4 {
 		return nil, ErrInvalidArray
 	}
-	count := int(binary.LittleEndian.Uint32(b[:4]))
-	if count > MaxArrayElements {
+	// Bounded as a uint32: converted first, a count of 2^31 or more would be
+	// negative where int is 32 bits wide.
+	n := binary.LittleEndian.Uint32(b[:4])
+	if n > MaxArrayElements {
 		return nil, ErrArrayTooLarge
 	}
+	count := int(n)
 	bits := b[4:]
 	needed := (count + 7) / 8
 	if len(bits) < needed {

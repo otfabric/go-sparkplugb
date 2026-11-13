@@ -1,5 +1,31 @@
 # go-sparkplugb Releases
 
+## v0.4.1
+
+**Date:** 2026-11-13
+**Previous release:** v0.4.0
+
+No API change. A static analysis pass (gosec, opengrep at severity and confidence low) and the move to otfabric/engineering policy 1.5.
+
+### Fixed
+
+- **`payload.GetValue`: the element count of a BooleanArray is compared with `MaxArrayElements` as the 32-bit value read from the payload,** before it becomes an `int`. Where `int` is 32 bits wide (`386`, `arm`), a count of 2^31 or more was not held to that limit until now; such a payload now returns `ErrArrayTooLarge` on every platform.
+
+### Security
+
+- SAST review (gosec, opengrep at severity and confidence low) of the module and of the `interop` module: 35 findings, all reviewed in the code and recorded as false positives or accepted risks in the organisation's private triage, not in this repository: the integer conversions of the Sparkplug wire encodings (a signed integer travels in an unsigned field, the datatype in a `uint32`; each decoded value is range-checked before it is narrowed), the millisecond timestamp of a birth, and `math/rand/v2` for the jitter of reconnect backoff. The `interop` module has none. The BooleanArray count above was found in that review, not by the scanners. There is no `//nolint` or `#nosec`. Gosec and Opengrep do not run in public CI (otfabric/engineering ADR-0011): a maintainer scans before each release.
+- SECURITY.md has a Static analysis section.
+
+### Changed
+
+- otfabric/engineering policy 1.5 (was 1.4): `.otfabric/policy.yaml`, the policy checker v1.5.0 in CI and the docs check, and the shared workflows v3.6.0. `otfabric-policy check` v1.5.0: compliant, no failing rule.
+
+### Tests
+
+- `TestBooleanArrayCountHighBit`: counts of 2^31 and 2^32-1 return `ErrArrayTooLarge`; run on linux/386 as well, where it fails without the fix.
+
+---
+
 ## v0.4.0
 
 **Date:** 2026-11-13
