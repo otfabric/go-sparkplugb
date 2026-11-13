@@ -261,7 +261,7 @@ func (n *Node) Connect(ctx context.Context) error {
 
 	ncmdTopic := topic.ForNCMD(n.cfg.GroupID, n.cfg.EdgeNodeID)
 	if err := n.transport.Subscribe(ctx, ncmdTopic, 1, n.makeHandler(connGen)); err != nil {
-		return fmt.Errorf("sparkplugb: subscribe NCMD: %w", err)
+		return n.abortConnect(ctx, fmt.Errorf("sparkplugb: subscribe NCMD: %w", err))
 	}
 
 	dcmdTopic := topic.Topic{
@@ -271,7 +271,7 @@ func (n *Node) Connect(ctx context.Context) error {
 		DeviceID:   "+",
 	}.String()
 	if err := n.transport.Subscribe(ctx, dcmdTopic, 1, n.makeHandler(connGen)); err != nil {
-		return fmt.Errorf("sparkplugb: subscribe DCMD: %w", err)
+		return n.abortConnect(ctx, fmt.Errorf("sparkplugb: subscribe DCMD: %w", err))
 	}
 
 	if n.cfg.PrimaryHostID != "" {
@@ -282,7 +282,7 @@ func (n *Node) Connect(ctx context.Context) error {
 		n.mu.Unlock()
 		stateTopic := topic.ForState(n.cfg.PrimaryHostID)
 		if err := n.transport.Subscribe(ctx, stateTopic, 1, n.makeStateHandler(connGen)); err != nil {
-			return fmt.Errorf("sparkplugb: subscribe STATE: %w", err)
+			return n.abortConnect(ctx, fmt.Errorf("sparkplugb: subscribe STATE: %w", err))
 		}
 	} else {
 		n.mu.Lock()
@@ -291,6 +291,21 @@ func (n *Node) Connect(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// abortConnect ends a connection on which the session could not be set up,
+// and returns err. Left up, the connection kept its will armed and the node
+// between Connecting and Online, and the next Connect opened a second one
+// beside it. No NBIRTH went out on it, so no NDEATH is owed: a DISCONNECT
+// ends it and discards the will.
+func (n *Node) abortConnect(ctx context.Context, err error) error {
+	n.mu.Lock()
+	if n.state != Closed {
+		n.setState(Disconnected)
+	}
+	n.mu.Unlock()
+	_ = n.transport.Disconnect(context.WithoutCancel(ctx))
+	return err
 }
 
 func (n *Node) PublishBirth(ctx context.Context, nodeMetrics []*pb.Payload_Metric) error {

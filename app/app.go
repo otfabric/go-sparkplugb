@@ -4,6 +4,8 @@ package app
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sync"
@@ -123,7 +125,7 @@ func New(transport mqtt.Transport, cfg Config) (*Application, error) {
 		return nil, errors.New("sparkplugb: Password requires Username")
 	}
 	if cfg.ClientID == "" {
-		cfg.ClientID = fmt.Sprintf("sparkplug_app_%d", time.Now().UnixNano()%100000)
+		cfg.ClientID = randomClientID()
 	}
 	if cfg.Metrics == nil {
 		cfg.Metrics = NopMetrics{}
@@ -139,6 +141,17 @@ func New(transport mqtt.Transport, cfg Config) (*Application, error) {
 		sessionWait:   sessionWait,
 		lateBirthWait: lateBirthWait,
 	}, nil
+}
+
+// randomClientID returns the client ID of an application that names none:
+// sparkplug_app_ and 8 random hex digits, 22 bytes (MQTT 3.1.1 obliges a
+// broker to accept 23). A broker disconnects a client when another connects
+// with its ID [MQTT-3.1.4-2], so two applications must not draw the same
+// one: the clock modulo 100000, used before, gave a pair 1 chance in 100000.
+func randomClientID() string {
+	b := make([]byte, 4)
+	_, _ = rand.Read(b) // crypto/rand.Read never returns an error
+	return "sparkplug_app_" + hex.EncodeToString(b)
 }
 
 func (a *Application) Connect(ctx context.Context) error {
@@ -172,6 +185,15 @@ func (a *Application) Connect(ctx context.Context) error {
 	}
 
 	if err := a.transport.Subscribe(ctx, topic.Namespace+"/#", 0, a.handleMessage); err != nil {
+		// Left up, the connection kept the application in Connecting, and
+		// the next Connect opened a second one beside it.
+		a.mu.Lock()
+		if a.state != Closed {
+			a.setState(Disconnected)
+		}
+		a.stopSessionTimers()
+		a.mu.Unlock()
+		_ = a.transport.Disconnect(context.WithoutCancel(ctx))
 		return fmt.Errorf("sparkplugb: subscribe spBv1.0/#: %w", err)
 	}
 

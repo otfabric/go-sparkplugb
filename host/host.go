@@ -182,16 +182,16 @@ func (a *App) Connect(ctx context.Context) error {
 	}
 
 	if err := a.transport.Subscribe(ctx, stateTopic, 1, a.handleMessage); err != nil {
-		return fmt.Errorf("sparkplugb: subscribe STATE: %w", err)
+		return a.abortConnect(ctx, false, fmt.Errorf("sparkplugb: subscribe STATE: %w", err))
 	}
 
 	if err := a.transport.Subscribe(ctx, topic.Namespace+"/#", 1, a.handleMessage); err != nil {
-		return fmt.Errorf("sparkplugb: subscribe spBv1.0/#: %w", err)
+		return a.abortConnect(ctx, false, fmt.Errorf("sparkplugb: subscribe spBv1.0/#: %w", err))
 	}
 
 	birthPayload, _ := json.Marshal(statePayload{Online: true, Timestamp: ts})
 	if err := a.transport.Publish(ctx, stateTopic, 1, true, birthPayload); err != nil {
-		return fmt.Errorf("sparkplugb: publish STATE birth: %w", err)
+		return a.abortConnect(ctx, true, fmt.Errorf("sparkplugb: publish STATE birth: %w", err))
 	}
 
 	a.mu.Lock()
@@ -201,6 +201,29 @@ func (a *App) Connect(ctx context.Context) error {
 	return nil
 }
 
+// abortConnect ends a connection on which the session could not be set up,
+// and returns err. Left up, the connection kept its will armed and the host
+// in Connecting, and the next Connect opened a second one beside it. A
+// DISCONNECT discards the will, so when the STATE birth may have reached the
+// broker (birthSent) the STATE death is published first: edge nodes would
+// otherwise keep the host's retained STATE online.
+func (a *App) abortConnect(ctx context.Context, birthSent bool, err error) error {
+	a.mu.Lock()
+	if a.state != Closed {
+		a.setState(Disconnected)
+	}
+	a.stopTimers()
+	a.mu.Unlock()
+
+	ctx = context.WithoutCancel(ctx)
+	if birthSent {
+		deathPayload, _ := json.Marshal(statePayload{Online: false, Timestamp: time.Now().UnixMilli()})
+		_ = a.transport.Publish(ctx, topic.ForState(a.cfg.HostID), 1, true, deathPayload)
+	}
+	_ = a.transport.Disconnect(ctx)
+	return err
+}
+
 func (a *App) Disconnect(ctx context.Context) error {
 	a.mu.Lock()
 	if a.state == Closed || a.state == Disconnected {
@@ -208,11 +231,7 @@ func (a *App) Disconnect(ctx context.Context) error {
 		return nil
 	}
 	a.setState(Disconnected)
-	for k, t := range a.reorderTimers {
-		t.Stop()
-		delete(a.reorderTimers, k)
-	}
-	a.stopSessionTimers()
+	a.stopTimers()
 	a.mu.Unlock()
 
 	ts := time.Now().UnixMilli()
@@ -350,11 +369,7 @@ func (a *App) onConnectionLost(err error) {
 		return
 	}
 	a.cfg.Logger.Warnf("transport lost: %v", err)
-	for k, t := range a.reorderTimers {
-		t.Stop()
-		delete(a.reorderTimers, k)
-	}
-	a.stopSessionTimers()
+	a.stopTimers()
 	a.setState(Disconnected)
 }
 
@@ -548,8 +563,13 @@ func (a *App) expectSession(t topic.Topic) {
 	})
 }
 
-// stopSessionTimers ends every wait for a NBIRTH. Called with a.mu held.
-func (a *App) stopSessionTimers() {
+// stopTimers ends every pending rebirth request: the waits for a missing
+// sequence number and the waits for a NBIRTH. Called with a.mu held.
+func (a *App) stopTimers() {
+	for k, t := range a.reorderTimers {
+		t.Stop()
+		delete(a.reorderTimers, k)
+	}
 	for k, t := range a.sessionTimers {
 		t.Stop()
 		delete(a.sessionTimers, k)
