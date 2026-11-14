@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	pb "github.com/otfabric/go-sparkplugb/proto"
+	"google.golang.org/protobuf/proto"
 )
 
 func FuzzDecode(f *testing.F) {
@@ -46,13 +47,36 @@ func FuzzDecode(f *testing.F) {
 		f.Add(b)
 	}
 
+	// Seed with a DataSet, a template with a parameter, and properties
+	ds, _ := NewDataSet("ds", []string{"a", "b"}, []pb.DataType{pb.DataType_Int8, pb.DataType_Double}, [][]any{{int8(-1), 0.5}})
+	param, _ := NewTemplateParameter("p", pb.DataType_UInt32, uint32(7))
+	tpl, _ := NewTemplateDefinition("T", "", nil, []*pb.Payload_Template_Parameter{param})
+	prop, _ := NewPropertyValue(pb.DataType_Int32, int32(192))
+	withProps, _ := NewMetric("q", pb.DataType_Float, float32(1))
+	withProps.Properties = &pb.Payload_PropertySet{Keys: []string{"Quality"}, Values: []*pb.Payload_PropertyValue{prop}}
+	b5, _ := Encode(NewPayload(0, ds, tpl, withProps))
+	f.Add(b5)
+
 	f.Fuzz(func(t *testing.T, data []byte) {
 		p, err := Decode(data)
 		if err != nil {
 			return
 		}
+		// What decodes encodes to a payload that decodes to the same.
+		b, err := Encode(p)
+		if err != nil {
+			t.Fatalf("Encode of a decoded payload: %v", err)
+		}
+		again, err := Decode(b)
+		if err != nil {
+			t.Fatalf("Decode of an encoded payload: %v", err)
+		}
+		if !proto.Equal(p, again) {
+			t.Fatal("Decode(Encode(p)) differs from p")
+		}
+		// Every getter returns a documented error or the documented Go type.
 		for _, m := range p.Metrics {
-			_, _ = GetValue(m)
+			checkMetric(t, m)
 		}
 	})
 }

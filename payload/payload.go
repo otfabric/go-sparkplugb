@@ -36,6 +36,9 @@ func NewPayload(seq uint64, metrics ...*pb.Payload_Metric) *pb.Payload {
 	}
 }
 
+// NewMetric returns a metric named name, stamped now, with the value v of
+// datatype dt as SetValue sets it: a []byte, DataSet or Template is kept,
+// not copied.
 func NewMetric(name string, dt pb.DataType, v any) (*pb.Payload_Metric, error) {
 	m := &pb.Payload_Metric{Name: &name}
 	ts := uint64(time.Now().UnixMilli())
@@ -92,8 +95,8 @@ func SetQuality(m *pb.Payload_Metric, quality int32) {
 }
 
 // GetQuality returns the "quality" property of m. The value of a property is
-// Int32 (tck-id-payloads-propertyset-quality-value-type); one that is not returns
-// false.
+// Int32 (tck-id-payloads-propertyset-quality-value-type); one whose type is
+// not Int32, or whose value is not an Int32, returns false.
 func GetQuality(m *pb.Payload_Metric) (int32, bool) {
 	if m.Properties == nil {
 		return 0, false
@@ -101,6 +104,9 @@ func GetQuality(m *pb.Payload_Metric) (int32, bool) {
 	for i, k := range m.Properties.Keys {
 		if k == "quality" {
 			if i < len(m.Properties.Values) {
+				if pb.DataType(m.Properties.Values[i].GetType()) != pb.DataType_Int32 {
+					return 0, false
+				}
 				v, err := propertyInteger(pb.DataType_Int32, m.Properties.Values[i])
 				if err != nil {
 					return 0, false

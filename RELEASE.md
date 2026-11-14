@@ -1,5 +1,44 @@
 # go-sparkplugb Releases
 
+## v0.4.3
+
+**Date:** 2026-11-14
+**Previous release:** v0.4.2
+
+No API change. The findings of the policy 1.6 review that a patch can carry.
+
+### Fixed
+
+- **`payload`: templates nested more than 32 deep return `ErrInvalidTemplate`,** from `TemplateDefs.Check`, `NewTemplateDefs` and so from the edge node's publish and the `host` and `app` checks on receipt. The checks take time and memory in proportion to the templates they check.
+- **`host`, `app`: the messages held for reordering are bounded over all edge nodes,** known or not: at most 4096 messages and 8 MiB of payload, besides 256 per node. Past either bound the oldest held message is dropped. A held message waits at most 30 s for the gap before it, for every edge node, also one that sends nothing more; the rebirth requests and deaths an edge node leaves behind are forgotten once their time has passed. At most 16 rebirth requests are on their way at once, one per edge node.
+- **`payload`: the getters return `ErrTypeMismatch` for a value carried in another field than its datatype's,** for every datatype: `GetValue`, `GetPropertyValue`, `GetTemplateParameterValue` and the cells of `GetDataSetValues`, as ERRORS.md documents. `GetDataSetValues` returns `ErrColumnMismatch` for a DataSet whose columns and types differ in count, or whose `num_of_columns` differs from them, and `ErrUnknownType` for a value in a column whose type is not basic. `GetQuality` returns false for a `quality` property whose type is not Int32.
+- **`edge`, `host`, `app`: `Close` is safe to call more than once and from several goroutines.** The first call closes the runtime; the others return nil at once.
+- **`edge`, `host`, `app`: a `Connect` in progress when `Close` is called returns `ErrClosed`,** the edge node's walk to another server included. The transport is disconnected and the state stays `Closed`.
+- **`edge`, `host`, `app`: `OnState` and `Metrics.OnStateChange` are called with no lock of the runtime held,** once per transition, one call at a time, in order. They may call the runtime: `State`, `PublishBirth` on `Online`, `Close`, `Connect` after `Disconnected`, as the message callbacks already could. `Disconnected` after `Disconnect` or a failed `Connect` is delivered once the connection has ended. API.md has a Callbacks table: which goroutine calls each callback and what it may do.
+- **`edge`: the metrics of a birth are copied.** `PublishBirth` and `PublishDeviceBirth` keep copies of the caller's metrics for `Rebirth`, so a later change of the caller's is not in a rebirth until it is sent as data. **`host`, `app`:** the birth callbacks receive copies, not the metrics the registry keeps. API.md has an Ownership table, and the doc comments of the getters and constructors say what they keep and return.
+- **`edge`, `host`, `app`: a callback, `Metrics` or `Logger` method, `BdSeqStore` or `RetryPolicy` that does not return normally is recovered** where the runtime calls it, and logged at error level with its stack once the runtime holds none of its locks. The runtime goes on.
+- **`mqtt`: `PahoTransport.Connect` returns when `ctx` ends,** with an error wrapping `ctx.Err()`, as well as when the broker accepts the connection or `ConnectTimeout` passes. It does not hold its lock while it waits, so `Disconnect` during `Connect` returns at once and ends the attempt, and an attempt that ended with `ctx` or the timeout does not connect later. The zero value of `PahoTransport` uses the timeouts of `NewPahoTransport`; its fields have doc comments.
+- **`edge.New`, `host.New` refuse an ID that cannot be a topic segment** (`GroupID`, `EdgeNodeID`, `PrimaryHostID`, `HostID`: not valid UTF-8, or with `/`, `+` or `#`) with `topic.ErrInvalidID`. **`topic.Parse` returns `topic.ErrInvalidID` for an ID that is not valid UTF-8,** as docs/CONFORMANCE.md stated.
+
+### Documentation
+
+- docs/CONFORMANCE.md: the ID rows say what is checked (group and edge node IDs **Y**, device IDs **P**: the device ID given to the edge node's device methods is not checked), and the NCMD rebirth row matches the code. README: the blocking calls and `context.Context`, the ID rules, `OnState` per runtime.
+- examples/server-walking publishes the NBIRTH from `OnState` when the node becomes `Online`, also after a walk to another server.
+- SECURITY.md: the resource limits above; INTEROPERABILITY.md, ERRORS.md, ARCHITECTURE.md and OBSERVABILITY.md for the changes above.
+- TESTING.md: the lifecycle matrix L1–L16 for `edge.Node`, `host.App`, `app.Application` and `mqtt.PahoTransport`, the fuzz targets and allocation budgets, and how the tests wait for events and time.
+
+### Tests
+
+- Lifecycle tests for each runtime: concurrent `Close` (L2), `Close` during `Connect` and during the server walk (L5), `OnState` that calls the runtime (L9, L10) and connects again when `Disconnected`, a callback that does not return normally. `mqtt`: `Connect` with a broker that does not answer, `Disconnect` during `Connect`, the zero value.
+- Bounds of the held messages and the rebirth requests in `host` and `app`, with `testing/synctest`; template nesting at and past 32; the getters for every datatype and value kind; birth metric copies; ID tables for `New` and `topic.Parse`.
+- Fuzz targets for the message handling of `edge`, `host` and `app`, and for the getters; `FuzzDecode`, `FuzzParse` and `FuzzTemplateDefs` assert invariants. `TestDecodeLimitsAllocationBudget` bounds what the getters allocate. `make fuzz` finds every target with `go test -list`.
+
+### CI
+
+- The release workflow builds and tests otfabric/sparkplugbctl and otfabric/sparkplugb-interop (`own/go-sparkplugb`) against the candidate before it is tagged (`consumers`).
+
+---
+
 ## v0.4.2
 
 **Date:** 2026-11-13

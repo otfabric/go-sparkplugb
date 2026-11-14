@@ -5,6 +5,7 @@ package topic
 import (
 	"errors"
 	"strings"
+	"unicode/utf8"
 )
 
 const Namespace = "spBv1.0"
@@ -150,8 +151,10 @@ func Parse(topic string) (Topic, error) {
 	}, nil
 }
 
+// validateID checks an ID segment of a topic: not empty, valid UTF-8, and
+// without '/', '+' or '#'.
 func validateID(id string) error {
-	if id == "" {
+	if id == "" || !utf8.ValidString(id) {
 		return ErrInvalidID
 	}
 	for _, c := range id {

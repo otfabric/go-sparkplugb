@@ -60,7 +60,7 @@ receiver does with a value out of range. The readings below are this library's.
 | UInt64 | the value | none |
 | DateTime | milliseconds since the epoch | above `math.MaxInt64`, which a `time.Time` cannot hold from milliseconds: `ErrTypeMismatch` |
 
-A value of another kind, a string in an Int8, is `ErrTypeMismatch` too. A metric
+A value of another kind, a string in an Int8 or in a Float, is `ErrTypeMismatch` too, for every datatype. A metric
 or parameter with no value at all reads as zero, as before, and a DataSet cell
 with no value as `nil`.
 
@@ -76,17 +76,17 @@ or `uint64`: it is checked by the table above and written in the form above.
 
 | Situation | What the host (package `host`) and the application (package `app`) do |
 |-----------|-------------------------------------------------------------|
-| Messages of a node out of `seq` order | Held, at most 256 per node and 30 seconds, and applied in `seq` order once the gap is filled. MQTT orders messages per topic only, and NanoMQ and HiveMQ CE do deliver a node's DBIRTH before its NBIRTH and data out of order |
+| Messages of a node out of `seq` order | Held, at most 256 per node, 4096 and 8 MiB of payload over all nodes (the oldest dropped first), and 30 seconds, and applied in `seq` order once the gap is filled. MQTT orders messages per topic only, and NanoMQ and HiveMQ CE do deliver a node's DBIRTH before its NBIRTH and data out of order |
 | Message behind the expected `seq` | Held for the node's next session and applied after its NBIRTH: a restarted node's DBIRTH may arrive before its NBIRTH. When no NBIRTH follows within 2 seconds, NCMD `Node Control/Rebirth` |
 | Message out of sequence, older than the node's current NBIRTH | Dropped, up to 30 seconds after that NBIRTH, and held messages older than an NBIRTH are dropped when it arrives: they are of a session that has ended. Reading: Sparkplug has the payload timestamp be the time of publishing, and data messages carry no session number. A message without a timestamp is not judged, and one in sequence is applied. |
 | Message applied to a session, newer than the NBIRTH that follows it, or a DBIRTH of the same millisecond | Applied again after that NBIRTH: it is of the new session, and arrived with the `seq` the session before expected |
 | A gap that is not filled | NCMD `Node Control/Rebirth` after `ReorderTimeout` (host), at once without it |
 | An NBIRTH within 250 ms of the NDEATH of its `bdSeq` | Dropped, and NCMD `Node Control/Rebirth` 2 seconds later: a will can overtake a rebirth in flight, seen with srad on HiveMQ CE. The specification does not cover this, and only the time separates it from a restart: srad and SparkplugNet start again at `bdSeq` 0, and SparkplugNet did not answer the rebirth after its restart |
 | Data or DBIRTH from a node without a birth | NCMD `Node Control/Rebirth` |
-| Any of the rebirth requests above | One pending per node: the next waits for the NBIRTH or 2 seconds, however many messages are out of order |
+| Any of the rebirth requests above | One pending per node: the next waits for the NBIRTH or 2 seconds, however many messages are out of order. At most 16 on their way over all nodes: a request beyond that is not sent, and the next message out of sequence asks again |
 | NDEATH whose `bdSeq` is not the birth's | Ignored: it is the will of an earlier session, which a broker may deliver late |
 | Data metric with only an alias | Stored by the name and datatype of its birth |
-| A template that breaks Sparkplug: a definition outside the NBIRTH or with a `template_ref`, an instance of a definition the NBIRTH does not have, a member or parameter the definition lacks, a birth instance without all members | A warning on the `Logger`, and the message is applied and delivered. A definition is kept even when it breaks a rule, so that its instances are still checked against it |
+| A template that breaks Sparkplug: a definition outside the NBIRTH or with a `template_ref`, an instance of a definition the NBIRTH does not have, a member or parameter the definition lacks, a birth instance without all members, templates nested more than 32 deep | A warning on the `Logger`, and the message is applied and delivered. A definition is kept even when it breaks a rule, so that its instances are still checked against it |
 | `GetNode`, `Nodes` | Return copies, safe to read while messages arrive |
 
 ## Verification status

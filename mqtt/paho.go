@@ -12,28 +12,81 @@ import (
 	paho "github.com/eclipse/paho.mqtt.golang"
 )
 
+// PahoTransport is a Transport over the Eclipse Paho MQTT client, one
+// connection at a time. Its zero value is ready to use, with the timeouts of
+// NewPahoTransport. Set its fields before the first Connect.
 type PahoTransport struct {
-	mu     sync.Mutex
-	client paho.Client
-	opts   *paho.ClientOptions
-	onLost func(error)
-	closed chan struct{} // closed when the current connection ends
+	mu         sync.Mutex
+	client     paho.Client
+	opts       *paho.ClientOptions
+	onLost     func(error)
+	closed     chan struct{} // closed when the current connection ends
+	connecting chan struct{} // holds a token while a Connect runs: one at a time
 
-	TLSConfig      *tls.Config
+	// TLSConfig, if set, is the TLS configuration of a connection to an
+	// ssl://, tls://, mqtts:// or wss:// broker. It is used as it is.
+	TLSConfig *tls.Config
+	// ConnectTimeout bounds a Connect: the dial, the handshake and Paho's
+	// fallback to MQTT 3.1 together. Zero or less means 10 seconds.
 	ConnectTimeout time.Duration
+	// PublishTimeout bounds a Publish and a Subscribe, and the write of a
+	// packet to the connection. Zero or less means 5 seconds.
 	PublishTimeout time.Duration
 }
 
+const (
+	defaultConnectTimeout = 10 * time.Second
+	defaultPublishTimeout = 5 * time.Second
+)
+
+func (t *PahoTransport) connectTimeout() time.Duration {
+	if t.ConnectTimeout > 0 {
+		return t.ConnectTimeout
+	}
+	return defaultConnectTimeout
+}
+
+func (t *PahoTransport) publishTimeout() time.Duration {
+	if t.PublishTimeout > 0 {
+		return t.PublishTimeout
+	}
+	return defaultPublishTimeout
+}
+
+// NewPahoTransport returns a transport with a ConnectTimeout of 10 seconds
+// and a PublishTimeout of 5 seconds.
 func NewPahoTransport() *PahoTransport {
 	return &PahoTransport{
-		ConnectTimeout: 10 * time.Second,
-		PublishTimeout: 5 * time.Second,
+		ConnectTimeout: defaultConnectTimeout,
+		PublishTimeout: defaultPublishTimeout,
 	}
 }
 
+// Connect opens a connection to opts.BrokerURL, in place of the current one,
+// and returns once the broker accepted it, ctx ended or ConnectTimeout
+// passed. An attempt that ends with ctx or the timeout is aborted: it does
+// not connect later. A Disconnect meanwhile aborts it too, and Connect
+// returns an error wrapping ErrConnectionLost. Connect does not hold the
+// transport's lock while it waits, so Disconnect, Publish and Subscribe
+// return at once; a second Connect waits for the first, or for its own ctx.
 func (t *PahoTransport) Connect(ctx context.Context, opts ConnectOpts) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("sparkplugb: connect: %w", err)
+	}
 	t.mu.Lock()
-	defer t.mu.Unlock()
+	if t.connecting == nil {
+		t.connecting = make(chan struct{}, 1)
+	}
+	connecting := t.connecting
+	t.mu.Unlock()
+	select {
+	case connecting <- struct{}{}:
+		defer func() { <-connecting }()
+	case <-ctx.Done():
+		return fmt.Errorf("sparkplugb: connect: %w", ctx.Err())
+	}
+
+	connectTimeout := t.connectTimeout()
 
 	pahoOpts := paho.NewClientOptions()
 	pahoOpts.AddBroker(opts.BrokerURL)
@@ -50,41 +103,77 @@ func (t *PahoTransport) Connect(ctx context.Context, opts ConnectOpts) error {
 		pahoOpts.SetTLSConfig(t.TLSConfig)
 	}
 
-	if t.ConnectTimeout > 0 {
-		pahoOpts.SetConnectTimeout(t.ConnectTimeout)
-	}
+	pahoOpts.SetConnectTimeout(connectTimeout)
 
 	// Without this paho waits 30s to hand a packet to a connection that has
 	// just dropped, before any token exists to wait on.
-	if t.PublishTimeout > 0 {
-		pahoOpts.SetWriteTimeout(t.PublishTimeout)
-	}
+	pahoOpts.SetWriteTimeout(t.publishTimeout())
 
 	if opts.WillTopic != "" {
 		pahoOpts.SetBinaryWill(opts.WillTopic, opts.WillPayload, opts.WillQoS, opts.WillRetained)
 	}
 
+	// Paho calls the handler on a goroutine of its own. It waits for the
+	// outcome of this Connect: the end of a connection that Connect returned
+	// is reported after it, through OnConnectionLost.
+	decided := make(chan struct{})
+	defer close(decided)
 	pahoOpts.SetConnectionLostHandler(func(c paho.Client, err error) {
+		<-decided
 		if lost := t.release(c); lost != nil {
 			lost(fmt.Errorf("%w: %w", ErrConnectionLost, err))
 		}
 	})
 
+	client := paho.NewClient(pahoOpts)
+	t.mu.Lock()
 	t.opts = pahoOpts
-	t.client = paho.NewClient(pahoOpts)
+	t.client = client
 	t.onLost = nil
 	t.closed = make(chan struct{})
+	closed := t.closed
+	t.mu.Unlock()
 
-	token := t.client.Connect()
-	if !token.WaitTimeout(t.ConnectTimeout) {
-		return fmt.Errorf("sparkplugb: connect timeout")
+	token := client.Connect()
+	timer := time.NewTimer(connectTimeout)
+	defer timer.Stop()
+	var err error
+	select {
+	case <-token.Done():
+		if err := token.Error(); err != nil {
+			return fmt.Errorf("sparkplugb: connect: %w", err)
+		}
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		if t.client != client { // Disconnect was called meanwhile
+			return fmt.Errorf("sparkplugb: connect: %w", ErrConnectionLost)
+		}
+		t.onLost = opts.OnConnectionLost
+		return nil
+	case <-closed: // Disconnect was called, and ended the attempt
+		return fmt.Errorf("sparkplugb: connect: %w", ErrConnectionLost)
+	case <-ctx.Done():
+		err = fmt.Errorf("sparkplugb: connect: %w", ctx.Err())
+	case <-timer.C:
+		err = fmt.Errorf("sparkplugb: connect timeout")
 	}
-	if err := token.Error(); err != nil {
-		return fmt.Errorf("sparkplugb: connect: %w", err)
-	}
+	// Paho goes on with the attempt, and with its MQTT 3.1 fallback after
+	// it: end the attempt, so that it does not connect later.
+	t.release(client)
+	end(client)
+	return err
+}
 
-	t.onLost = opts.OnConnectionLost
-	return nil
+// end ends the connection of client: with a DISCONNECT, which makes the
+// broker discard the will, when it is connected. Otherwise it ends the
+// attempt in progress: Paho finishes the handshake on its own goroutine and
+// then closes the connection.
+func end(client paho.Client) {
+	if client.IsConnected() {
+		client.Disconnect(250)
+	} else {
+		client.Disconnect(0)
+	}
 }
 
 // release detaches c if it is still the current client and returns the
@@ -157,14 +246,14 @@ func (t *PahoTransport) await(ctx context.Context, closed <-chan struct{}, what 
 	go func() {
 		token := op()
 		close(handed)
-		if !token.WaitTimeout(t.PublishTimeout) {
+		if !token.WaitTimeout(t.publishTimeout()) {
 			done <- timeout
 			return
 		}
 		done <- token.Error()
 	}()
 
-	timer := time.NewTimer(t.PublishTimeout)
+	timer := time.NewTimer(t.publishTimeout())
 	defer timer.Stop()
 	var err error
 	select {
@@ -186,14 +275,15 @@ func (t *PahoTransport) await(ctx context.Context, closed <-chan struct{}, what 
 	return err
 }
 
+// Disconnect ends the current connection, and aborts a Connect in progress.
 func (t *PahoTransport) Disconnect(ctx context.Context) error {
 	t.mu.Lock()
 	client := t.client
 	t.mu.Unlock()
 
 	lost := t.release(client)
-	if client != nil && client.IsConnected() {
-		client.Disconnect(250)
+	if client != nil {
+		end(client)
 	}
 	if lost != nil {
 		lost(ErrConnectionLost)

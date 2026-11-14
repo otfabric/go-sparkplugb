@@ -2,7 +2,11 @@
 
 package topic
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"unicode/utf8"
+)
 
 func FuzzParse(f *testing.F) {
 	f.Add("spBv1.0/group1/NBIRTH/node1")
@@ -18,6 +22,16 @@ func FuzzParse(f *testing.F) {
 		parsed, err := Parse(input)
 		if err != nil {
 			return
+		}
+		// An accepted topic is valid UTF-8, and its IDs hold no '/', '+'
+		// or '#'.
+		if !utf8.ValidString(input) {
+			t.Fatalf("accepted %q, which is not valid UTF-8", input)
+		}
+		for _, id := range []string{parsed.GroupID, parsed.EdgeNodeID, parsed.DeviceID} {
+			if strings.ContainsAny(id, "/+#") {
+				t.Fatalf("accepted %q with the ID %q", input, id)
+			}
 		}
 		roundTrip := parsed.String()
 		reparsed, err := Parse(roundTrip)

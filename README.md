@@ -42,7 +42,7 @@ MQTT 5. Any other MQTT client plugs in through the `mqtt.Transport` interface.
 | **Templates** | Template definitions (is_definition, version, member metrics, parameters) and instances (template_ref, parameter overrides); the edge node publishes definitions in the NBIRTH only, and only instances of a definition in it; the host and application report templates that break that |
 | **DataSets** | Columnar data with typed columns (num_of_columns, columns, types, rows), round-trip encode/decode |
 | **Topic namespace** | Parser and builder for `spBv1.0/{group}/{type}/{node}/[{device}]` with validation |
-| **Observability** | Pluggable `Logger` (`log/slog`, standard `log`) and `Metrics` callbacks per role; `context.Context` on every blocking call |
+| **Observability** | Pluggable `Logger` (`log/slog`, standard `log`) and `Metrics` callbacks per role; `context.Context` on every blocking call, which ends its wait (`PahoTransport.Disconnect` waits at most 250 ms for its DISCONNECT) |
 | **Protobuf types** | Generated from the canonical Eclipse Tahu `sparkplug_b.proto` (pinned commit, SHA-256 verified) |
 | **MQTT transport** | `mqtt.Transport` interface; Eclipse Paho adapter included (MQTT 3.1.1, with fallback to 3.1, over TCP, TLS or WebSocket; no MQTT 5) |
 
@@ -323,18 +323,18 @@ MQTT_BROKER=tcp://localhost:1883 go run ./examples/edge-node
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `GroupID` | `string` | required | Sparkplug group identifier |
-| `EdgeNodeID` | `string` | required | Edge node identifier |
+| `GroupID` | `string` | required | Sparkplug group identifier: valid UTF-8, without `/`, `+` or `#` |
+| `EdgeNodeID` | `string` | required | Edge node identifier, as `GroupID` |
 | `BrokerURL` | `string` | | MQTT broker URL (`tcp://`, `ssl://`) |
 | `ServerURLs` | `[]string` | | Multiple broker URLs for server walking |
 | `Username`, `Password` | `string` | | Broker login, for every server. A `Password` needs a `Username`. Never logged; use `ssl://` |
 | `ClientID` | `string` | `sparkplug_<group>_<node>` | MQTT client ID |
-| `PrimaryHostID` | `string` | | Primary Host Application ID: births wait for its STATE online; its STATE offline makes the node disconnect and walk to the next server |
+| `PrimaryHostID` | `string` | | Primary Host Application ID, as `GroupID`: births wait for its STATE online; its STATE offline makes the node disconnect and walk to the next server |
 | `BdSeqStore` | `BdSeqStore` | in memory | Where `bdSeq` is kept across restarts |
 | `RetryPolicy` | `sparkplugb.RetryPolicy` | `ExponentialBackoff{}` | Reconnect policy while walking servers |
 | `Logger` | `sparkplugb.Logger` | none | Logger (`NewSlogLogger`, `NewStdLogger`) |
 | `Metrics` | `edge.Metrics` | none | Connect, publish, message and state-change callbacks |
-| `OnState` | `func` | | State change callback |
+| `OnState` | `func` | | State change callback, called without the node's locks held: it may call the node, and publishes the NBIRTH when the state becomes `Online` |
 | `OnNodeCmd` | `func` | | NCMD received callback |
 | `OnDeviceCmd` | `func` | | DCMD received callback |
 
@@ -345,7 +345,7 @@ carry the alias only, and `ResolveAlias` maps it back.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `HostID` | `string` | required | Host Application identifier |
+| `HostID` | `string` | required | Host Application identifier: valid UTF-8, without `/`, `+` or `#` |
 | `BrokerURL` | `string` | | MQTT broker URL |
 | `ServerURLs` | `[]string` | | Multiple broker URLs |
 | `Username`, `Password` | `string` | | Broker login, for every server. A `Password` needs a `Username`. Never logged; use `ssl://` |
@@ -353,7 +353,7 @@ carry the alias only, and `ResolveAlias` maps it back.
 | `ReorderTimeout` | `time.Duration` | `0` | How long a `seq` gap may stay open before a rebirth request; `0` requests it at once |
 | `Logger` | `sparkplugb.Logger` | none | Logger |
 | `Metrics` | `host.Metrics` | none | Connect, message, state-change, node birth and death callbacks |
-| `OnState` | `func` | | State change callback |
+| `OnState` | `func` | | State change callback, called without the runtime's locks held: it may call the runtime |
 | `OnNodeBirth` | `func` | | NBIRTH callback |
 | `OnDeviceBirth` | `func` | | DBIRTH callback |
 | `OnNodeData` | `func` | | NDATA callback |
@@ -371,7 +371,7 @@ carry the alias only, and `ResolveAlias` maps it back.
 | `ClientID` | `string` | `sparkplug_app_` and 8 random hex digits | MQTT client ID |
 | `Logger` | `sparkplugb.Logger` | none | Logger |
 | `Metrics` | `app.Metrics` | none | Connect, message, state-change, node birth and death callbacks |
-| `OnState` | `func` | | State change callback |
+| `OnState` | `func` | | State change callback, called without the runtime's locks held: it may call the runtime |
 | `OnNodeBirth` | `func` | | NBIRTH callback |
 | `OnDeviceBirth` | `func` | | DBIRTH callback |
 | `OnNodeData` | `func` | | NDATA callback |
@@ -384,8 +384,8 @@ carry the alias only, and `ResolveAlias` maps it back.
 Edge nodes, host applications and applications move to `Disconnected` (and
 fire `OnState`) as soon as the transport reports the connection gone — a
 broker drop, a client-ID takeover, or `Disconnect` called on the transport
-directly. Call `Connect` again to resume; edge nodes bump `bdSeq` and must
-re-publish NBIRTH. Custom `mqtt.Transport` implementations report this by
+directly. Call `Connect` again to resume, from `OnState` too; edge nodes bump
+`bdSeq` and must re-publish NBIRTH. Callbacks: [API.md](API.md#callbacks). Custom `mqtt.Transport` implementations report this by
 calling `ConnectOpts.OnConnectionLost` with an error wrapping
 `mqtt.ErrConnectionLost`.
 

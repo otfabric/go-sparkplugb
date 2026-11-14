@@ -17,9 +17,9 @@ applicable (broker or server requirement).
 | Requirement | TCK ID | Status | Notes |
 |------------|--------|--------|-------|
 | Topic namespace `spBv1.0/{group}/{type}/{node}/[{device}]` | — | Y | topic package |
-| Group ID: valid UTF-8, no `/`, `+`, `#`, reserved words | tck-id-topics-group-id | Y | topic validation |
-| Edge Node ID: valid UTF-8, no `/`, `+`, `#`, reserved words | tck-id-topics-edge-node-id | Y | topic validation |
-| Device ID: valid UTF-8, no `/`, `+`, `#`, reserved words | tck-id-topics-device-id | Y | topic validation |
+| Group ID: valid UTF-8, no `/`, `+`, `#` | tck-id-topics-group-id | Y | `topic.Parse` on receipt; `edge.New` for the configured ID |
+| Edge Node ID: valid UTF-8, no `/`, `+`, `#` | tck-id-topics-edge-node-id | Y | `topic.Parse` on receipt; `edge.New` for the configured ID |
+| Device ID: valid UTF-8, no `/`, `+`, `#` | tck-id-topics-device-id | P | `topic.Parse` on receipt; the device ID given to `PublishDeviceBirth` and the other device methods is not checked |
 
 ### Message Types
 
@@ -76,7 +76,7 @@ applicable (broker or server requirement).
 
 | Requirement | TCK ID | Status | Notes |
 |------------|--------|--------|-------|
-| Handle NCMD with Node Control/Rebirth=true | tck-id-message-flow-edge-node-rebirth-action | Y | Sets born=false |
+| Handle NCMD with Node Control/Rebirth=true | tck-id-message-flow-edge-node-rebirth-action | Y | Calls `Rebirth`, one at a time |
 | On rebirth: re-publish NBIRTH + all DBIRTHs | tck-id-message-flow-edge-node-rebirth-publish | Y | Auto-rebirth via Rebirth() |
 
 ### Host Application Session Establishment

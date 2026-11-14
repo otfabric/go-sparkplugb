@@ -47,19 +47,30 @@ type ConnectOpts struct {
 type MessageHandler func(topic string, payload []byte)
 ```
 
+MessageHandler is called by a transport with each message received on a subscription. The payload is the handler's: a transport gives each message a slice of its own and does not use or change it after the call. The host and application runtimes keep it while they hold a message back.
+
 ### type PahoTransport
 
 ```go
 type PahoTransport struct {
 
 	// closed when the current connection ends
+	// holds a token while a Connect runs: one at a time
 
-	TLSConfig      *tls.Config
+	// TLSConfig, if set, is the TLS configuration of a connection to an
+	// ssl://, tls://, mqtts:// or wss:// broker. It is used as it is.
+	TLSConfig *tls.Config
+	// ConnectTimeout bounds a Connect: the dial, the handshake and Paho's
+	// fallback to MQTT 3.1 together. Zero or less means 10 seconds.
 	ConnectTimeout time.Duration
+	// PublishTimeout bounds a Publish and a Subscribe, and the write of a
+	// packet to the connection. Zero or less means 5 seconds.
 	PublishTimeout time.Duration
 
 }
 ```
+
+PahoTransport is a Transport over the Eclipse Paho MQTT client, one connection at a time. Its zero value is ready to use, with the timeouts of NewPahoTransport. Set its fields before the first Connect.
 
 #### func NewPahoTransport
 
@@ -67,17 +78,23 @@ type PahoTransport struct {
 func NewPahoTransport() *PahoTransport
 ```
 
+NewPahoTransport returns a transport with a ConnectTimeout of 10 seconds and a PublishTimeout of 5 seconds.
+
 #### func (PahoTransport) Connect
 
 ```go
 func (t *PahoTransport) Connect(ctx context.Context, opts ConnectOpts) error
 ```
 
+Connect opens a connection to opts.BrokerURL, in place of the current one, and returns once the broker accepted it, ctx ended or ConnectTimeout passed. An attempt that ends with ctx or the timeout is aborted: it does not connect later. A Disconnect meanwhile aborts it too, and Connect returns an error wrapping ErrConnectionLost. Connect does not hold the transport's lock while it waits, so Disconnect, Publish and Subscribe return at once; a second Connect waits for the first, or for its own ctx.
+
 #### func (PahoTransport) Disconnect
 
 ```go
 func (t *PahoTransport) Disconnect(ctx context.Context) error
 ```
+
+Disconnect ends the current connection, and aborts a Connect in progress.
 
 #### func (PahoTransport) Publish
 

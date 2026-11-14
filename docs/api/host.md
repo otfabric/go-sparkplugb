@@ -24,6 +24,9 @@ var (
 ```go
 type App struct {
 
+	// Close was called: Connect refuses, and one in progress ends with ErrClosed
+
+	// state transitions not yet delivered (notify)
 	// nodeKey -> pending rebirth timer
 	// nodeKey -> last rebirth request the host made itself
 	// nodeKey -> a request was throttled while one was pending
@@ -34,6 +37,17 @@ type App struct {
 	// nodeKey -> pending wait for an NBIRTH
 	// sessionWait, shorter in tests
 	// lateBirthWait, shorter in tests
+
+	// messages in held, over every node
+	// their payload bytes
+	// held messages dropped for maxHeldTotal and maxHeldBytes
+	// when sweep last ran
+	// rebirth requests being sent (askRebirth)
+
+	// stateMu keeps the STATE messages of a connection in order: Connect
+	// holds it from its last check for Close to the STATE birth, Disconnect
+	// while it publishes the STATE death, so that no birth follows the death.
+	// Taken before mu.
 
 }
 ```
@@ -49,6 +63,8 @@ func New(transport mqtt.Transport, cfg Config) (*App, error)
 ```go
 func (a *App) Close(ctx context.Context) error
 ```
+
+Close disconnects the host, as Disconnect does, and closes it: Connect then returns ErrClosed, and a Connect in progress ends with ErrClosed and leaves no connection up. Close is safe to call more than once and from several goroutines: the first call closes the host, the others return nil at once.
 
 #### func (App) Connect
 
@@ -206,6 +222,8 @@ type NodeEventHandler func(groupID, nodeID string)
 type NodeHandler func(groupID, nodeID string, metrics []*pb.Payload_Metric)
 ```
 
+NodeHandler is called with the metrics of an NBIRTH or NDATA, DeviceHandler with those of a DBIRTH or DDATA, NodeEventHandler for an NDEATH and DeviceEventHandler for a DDEATH. They are called on the transport's goroutine, without a lock of the host held, so they may call the host; the next message waits until they return, so they should not block. The metrics are the handler's: the host keeps copies of what it stores. A handler that does not return normally is logged with its stack, and the host goes on with the next message.
+
 ### type NopMetrics
 
 ```go
@@ -270,3 +288,5 @@ func (s State) String() string
 ```go
 type StateHandler func(old, new State)
 ```
+
+StateHandler is called with each transition of the host's state, in the order of the transitions and one call at a time, after the host has released its locks: on the goroutine that made the transition (the caller of Connect, Disconnect or Close, or the transport's when the connection is lost), or on one that was delivering an earlier transition when it was made. It may call the host, Close and Connect included; a transition such a call makes is delivered after the handler returns. Disconnected after Disconnect, or after a Connect that failed, is delivered once the host has ended the connection, so a Connect from the handler is not ended with it. A handler that does not return normally is logged with its stack, and the host goes on.

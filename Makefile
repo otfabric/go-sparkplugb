@@ -94,14 +94,15 @@ cover: coverage ## Open coverage report in browser
 	@go tool cover -html=coverage.out
 
 FUZZTIME ?= 30s
-FUZZ_TARGETS := ./payload:FuzzDecode ./payload:FuzzDecodeSignedInt ./payload:FuzzIntegerPaths ./payload:FuzzDecodeBooleanArray ./payload:FuzzDecodeStringArray ./topic:FuzzParse
 
-fuzz: ## Run the fuzz targets for FUZZTIME each (default 30s)
+fuzz: ## Run every fuzz target of the library packages (go test -list) for FUZZTIME each (default 30s)
 	@echo "Fuzzing (FUZZTIME=$(FUZZTIME))"
-	@for t in $(FUZZ_TARGETS); do \
-		pkg=$${t%%:*}; name=$${t##*:}; \
-		echo "$$pkg $$name"; \
-		go test -run '^$$' -fuzz "^$$name$$" -fuzztime $(FUZZTIME) "$$pkg" || exit 1; \
+	@for pkg in $(TEST_PKGS); do \
+		names="$$(go test -list '^Fuzz' "$$pkg")" || exit 1; \
+		for name in $$(echo "$$names" | grep '^Fuzz'); do \
+			echo "$$pkg $$name"; \
+			go test -run '^$$' -fuzz "^$$name$$" -fuzztime $(FUZZTIME) "$$pkg" || exit 1; \
+		done; \
 	done
 
 bench: ## Run the benchmarks
