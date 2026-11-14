@@ -11,6 +11,7 @@ import (
 	"time"
 
 	sparkplugb "github.com/otfabric/go-sparkplugb"
+	"github.com/otfabric/go-sparkplugb/internal/callback"
 	"github.com/otfabric/go-sparkplugb/mqtt"
 	"github.com/otfabric/go-sparkplugb/payload"
 	pb "github.com/otfabric/go-sparkplugb/proto"
@@ -55,8 +56,30 @@ func (s State) String() string {
 	return "unknown"
 }
 
+// StateHandler is called with each transition of the node's state, in the
+// order of the transitions and one call at a time, after the node has
+// released its locks: on the goroutine that made the transition (the caller
+// of Connect, Disconnect or Close, the transport's for a lost connection or
+// the primary host's STATE, or the node's own while it walks to another
+// server), or on one that was delivering an earlier transition when it was
+// made. It may call the node: PublishBirth when the state becomes Online,
+// Close, or Connect after Disconnected. A transition such a call makes is
+// delivered after the handler returns. Disconnected after Disconnect, or
+// after a Connect that failed, is delivered once the node has ended the
+// connection, so a Connect from the handler is not ended with it. A handler
+// that does not return normally is logged with its stack, and the node goes
+// on.
+//
+// The node does not publish an NBIRTH by itself: every session needs one,
+// after Connect and after each walk to another server, so publish it when
+// the state becomes Online.
 type StateHandler func(old, new State)
 
+// CommandHandler is called with the metrics of an NCMD (deviceID "") or a
+// DCMD, on the transport's goroutine and without a lock of the node held,
+// so it may call the node; the next message waits until it returns, so it
+// should not block. The metrics are the handler's. A handler that does not
+// return normally is logged with its stack, and the node goes on.
 type CommandHandler func(deviceID string, metrics []*pb.Payload_Metric)
 
 type Config struct {
@@ -113,6 +136,7 @@ type Node struct {
 
 	mu      sync.Mutex
 	state   State
+	closed  bool // Close was called: Connect refuses, and one in progress ends with ErrClosed
 	bdSeq   uint64
 	seq     uint64
 	devices map[string]*Device
@@ -122,6 +146,8 @@ type Node struct {
 	born    bool
 	gen     uint64 // connection generation; prevents stale callbacks
 	closeCh chan struct{}
+
+	transitions callback.Queue[transition] // state transitions not yet delivered (notify)
 
 	// Birth state for auto-rebirth
 	birthMetrics []*pb.Payload_Metric
@@ -152,6 +178,9 @@ type Node struct {
 	rebirthPending bool
 }
 
+// transition is a change of the node's state, for StateHandler.
+type transition struct{ old, new State }
+
 type Device struct {
 	ID      string
 	Metrics []*pb.Payload_Metric
@@ -168,6 +197,15 @@ func New(transport mqtt.Transport, cfg Config) (*Node, error) {
 	if cfg.Password != "" && cfg.Username == "" {
 		return nil, errors.New("sparkplugb: Password requires Username")
 	}
+	for _, id := range []struct{ name, value string }{
+		{"GroupID", cfg.GroupID},
+		{"EdgeNodeID", cfg.EdgeNodeID},
+		{"PrimaryHostID", cfg.PrimaryHostID},
+	} {
+		if id.value != "" && !validID(id.value) {
+			return nil, fmt.Errorf("sparkplugb: %s %q: %w", id.name, id.value, topic.ErrInvalidID)
+		}
+	}
 	if cfg.BdSeqStore == nil {
 		cfg.BdSeqStore = &memBdSeqStore{}
 	}
@@ -177,7 +215,7 @@ func New(transport mqtt.Transport, cfg Config) (*Node, error) {
 	if cfg.RetryPolicy == nil {
 		cfg.RetryPolicy = sparkplugb.ExponentialBackoff{}
 	}
-	cfg.Logger = sparkplugb.ComponentLogger(cfg.Logger, "edge")
+	cfg.Logger = callback.Logger(sparkplugb.ComponentLogger(cfg.Logger, "edge"))
 	if cfg.ClientID == "" {
 		cfg.ClientID = fmt.Sprintf("sparkplug_%s_%s", cfg.GroupID, cfg.EdgeNodeID)
 	}
@@ -195,23 +233,36 @@ func New(transport mqtt.Transport, cfg Config) (*Node, error) {
 
 func (n *Node) Connect(ctx context.Context) error {
 	n.mu.Lock()
-	if n.state == Closed {
+	if n.closed {
 		n.mu.Unlock()
 		return ErrClosed
 	}
 	n.setState(Connecting)
 
-	bdSeq, err := n.cfg.BdSeqStore.Load()
+	var bdSeq uint64
+	var err error
+	fail := callback.Try("BdSeqStore.Load", func() { bdSeq, err = n.cfg.BdSeqStore.Load() })
+	if fail != nil {
+		err = fail
+	}
 	if err != nil {
 		n.setState(Disconnected)
 		n.mu.Unlock()
+		callback.Report(n.cfg.Logger, fail)
+		n.notify()
 		return fmt.Errorf("sparkplugb: load bdSeq: %w", err)
 	}
 	n.bdSeq = (bdSeq + 1) % 256
 
-	if err := n.cfg.BdSeqStore.Store(n.bdSeq); err != nil {
+	fail = callback.Try("BdSeqStore.Store", func() { err = n.cfg.BdSeqStore.Store(n.bdSeq) })
+	if fail != nil {
+		err = fail
+	}
+	if err != nil {
 		n.setState(Disconnected)
 		n.mu.Unlock()
+		callback.Report(n.cfg.Logger, fail)
+		n.notify()
 		return fmt.Errorf("sparkplugb: store bdSeq: %w", err)
 	}
 
@@ -226,12 +277,14 @@ func (n *Node) Connect(ctx context.Context) error {
 	if err != nil {
 		n.setState(Disconnected)
 		n.mu.Unlock()
+		n.notify()
 		return fmt.Errorf("sparkplugb: encode NDEATH: %w", err)
 	}
 
 	n.gen++
 	connGen := n.gen
 	n.mu.Unlock()
+	n.notify()
 
 	brokerURL := n.brokerURL()
 
@@ -250,14 +303,21 @@ func (n *Node) Connect(ctx context.Context) error {
 	})
 	if err != nil {
 		n.mu.Lock()
-		n.setState(Disconnected)
+		closed := n.closed
+		if !closed {
+			n.setState(Disconnected)
+		}
 		n.mu.Unlock()
+		n.notify()
+		if closed {
+			return ErrClosed
+		}
 		return fmt.Errorf("sparkplugb: connect: %w", err)
 	}
 
-	n.mu.Lock()
-	n.setState(Subscribing)
-	n.mu.Unlock()
+	if !n.advance(Subscribing) {
+		return n.abortConnect(ctx, ErrClosed)
+	}
 
 	ncmdTopic := topic.ForNCMD(n.cfg.GroupID, n.cfg.EdgeNodeID)
 	if err := n.transport.Subscribe(ctx, ncmdTopic, 1, n.makeHandler(connGen)); err != nil {
@@ -277,37 +337,68 @@ func (n *Node) Connect(ctx context.Context) error {
 	if n.cfg.PrimaryHostID != "" {
 		// Waiting before subscribing: the retained STATE can arrive before
 		// Subscribe returns, and it only counts while the node waits for it.
-		n.mu.Lock()
-		n.setState(WaitingForPrimaryHost)
-		n.mu.Unlock()
+		if !n.advance(WaitingForPrimaryHost) {
+			return n.abortConnect(ctx, ErrClosed)
+		}
 		stateTopic := topic.ForState(n.cfg.PrimaryHostID)
 		if err := n.transport.Subscribe(ctx, stateTopic, 1, n.makeStateHandler(connGen)); err != nil {
 			return n.abortConnect(ctx, fmt.Errorf("sparkplugb: subscribe STATE: %w", err))
 		}
-	} else {
 		n.mu.Lock()
-		n.setState(Online)
+		closed := n.closed
 		n.mu.Unlock()
+		if closed {
+			return n.abortConnect(ctx, ErrClosed)
+		}
+	} else if !n.advance(Online) {
+		return n.abortConnect(ctx, ErrClosed)
 	}
 
 	return nil
 }
 
+// advance moves a Connect in progress to state s, and reports true, unless
+// Close was called meanwhile: then the state stays as Close leaves it.
+func (n *Node) advance(s State) bool {
+	n.mu.Lock()
+	if n.closed {
+		n.mu.Unlock()
+		return false
+	}
+	n.setState(s)
+	n.mu.Unlock()
+	n.notify()
+	return true
+}
+
 // abortConnect ends a connection on which the session could not be set up,
-// and returns err. Left up, the connection kept its will armed and the node
-// between Connecting and Online, and the next Connect opened a second one
-// beside it. No NBIRTH went out on it, so no NDEATH is owed: a DISCONNECT
-// ends it and discards the will.
+// or that Close ended meanwhile, and returns err, or ErrClosed after Close.
+// Left up, the connection kept its will armed and the node between
+// Connecting and Online, and the next Connect opened a second one beside
+// it. No NBIRTH went out on it, so no NDEATH is owed: a DISCONNECT ends it
+// and discards the will.
 func (n *Node) abortConnect(ctx context.Context, err error) error {
 	n.mu.Lock()
 	if n.state != Closed {
 		n.setState(Disconnected)
 	}
+	if n.closed {
+		err = ErrClosed
+	}
 	n.mu.Unlock()
 	_ = n.transport.Disconnect(context.WithoutCancel(ctx))
+	// Delivered once the connection has ended: a StateHandler that calls
+	// Connect when the node is Disconnected starts on a transport that is
+	// free, and its connection is not the one ended here.
+	n.notify()
 	return err
 }
 
+// PublishBirth publishes the NBIRTH of a new session with nodeMetrics, after
+// bdSeq and "Node Control/Rebirth". It sets the timestamp of a metric that
+// has none. The node keeps copies of the metrics for Rebirth: a change the
+// caller makes to its metrics afterwards is not published by a rebirth
+// until it is sent as data, and the caller may go on using its metrics.
 func (n *Node) PublishBirth(ctx context.Context, nodeMetrics []*pb.Payload_Metric) error {
 	n.seqMu.Lock()
 	defer n.seqMu.Unlock()
@@ -338,9 +429,10 @@ func (n *Node) publishBirth(ctx context.Context, nodeMetrics []*pb.Payload_Metri
 	n.aliases = make(map[uint64]string)
 	n.owners = make(map[uint64]string)
 
-	// Store birth metrics for auto-rebirth
-	n.birthMetrics = make([]*pb.Payload_Metric, len(nodeMetrics))
-	copy(n.birthMetrics, nodeMetrics)
+	// Copies for the rebirth, stamped as the NBIRTH is: the caller's
+	// metrics stay the caller's.
+	payload.StampMetrics(nodeMetrics)
+	n.birthMetrics = cloneSlice(nodeMetrics)
 
 	// Register aliases from birth metrics
 	for _, m := range nodeMetrics {
@@ -353,8 +445,6 @@ func (n *Node) publishBirth(ctx context.Context, nodeMetrics []*pb.Payload_Metri
 	seq := n.seq
 	bdSeq := n.bdSeq
 	n.mu.Unlock()
-
-	payload.StampMetrics(nodeMetrics)
 
 	birthMetrics := make([]*pb.Payload_Metric, 0, len(nodeMetrics)+2)
 	birthMetrics = append(birthMetrics, payload.BdSeqMetric(bdSeq))
@@ -393,6 +483,9 @@ func (n *Node) birthTime() uint64 {
 	}
 }
 
+// PublishDeviceBirth publishes the DBIRTH of a device. It sets the timestamp
+// of a metric that has none, and keeps copies of the metrics for Rebirth, as
+// PublishBirth does.
 func (n *Node) PublishDeviceBirth(ctx context.Context, deviceID string, metrics []*pb.Payload_Metric) error {
 	n.seqMu.Lock()
 	defer n.seqMu.Unlock()
@@ -418,8 +511,8 @@ func (n *Node) publishDeviceBirth(ctx context.Context, deviceID string, metrics 
 		n.devices[deviceID] = &Device{ID: deviceID}
 		n.order = append(n.order, deviceID)
 	}
-	n.devices[deviceID].Metrics = make([]*pb.Payload_Metric, len(metrics))
-	copy(n.devices[deviceID].Metrics, metrics)
+	payload.StampMetrics(metrics)
+	n.devices[deviceID].Metrics = cloneSlice(metrics)
 	n.devices[deviceID].Online = true
 
 	// Register aliases from device birth metrics
@@ -434,7 +527,6 @@ func (n *Node) publishDeviceBirth(ctx context.Context, deviceID string, metrics 
 	seq := n.seq
 	n.mu.Unlock()
 
-	payload.StampMetrics(metrics)
 	p := payload.NewPayload(seq, metrics...)
 	return n.publish(ctx, topic.DBIRTH, deviceID, p)
 }
@@ -607,15 +699,23 @@ func (n *Node) Disconnect(ctx context.Context) error {
 		}.String()
 		_ = n.transport.Publish(ctx, t, 1, false, ndeath)
 	}
-	return n.transport.Disconnect(ctx)
+	err := n.transport.Disconnect(ctx)
+	n.notify() // once the connection has ended, as in abortConnect
+	return err
 }
 
+// Close disconnects the node, as Disconnect does, and closes it: Connect
+// then returns ErrClosed, and a Connect in progress, a walk to another server
+// included, ends with ErrClosed and leaves no connection up. Close is safe
+// to call more than once and from several goroutines: the first call closes
+// the node, the others return nil at once.
 func (n *Node) Close(ctx context.Context) error {
 	n.mu.Lock()
-	if n.state == Closed {
+	if n.closed {
 		n.mu.Unlock()
 		return nil
 	}
+	n.closed = true
 	n.mu.Unlock()
 
 	err := n.Disconnect(ctx)
@@ -623,6 +723,7 @@ func (n *Node) Close(ctx context.Context) error {
 	n.setState(Closed)
 	close(n.closeCh)
 	n.mu.Unlock()
+	n.notify()
 	return err
 }
 
@@ -655,26 +756,39 @@ func (n *Node) ResolveAlias(alias uint64) (string, bool) {
 func (n *Node) makeConnLostHandler(connGen uint64) func(error) {
 	return func(err error) {
 		n.mu.Lock()
-		defer n.mu.Unlock()
 		if n.gen != connGen || n.state == Closed || n.state == Disconnected {
+			n.mu.Unlock()
 			return
 		}
 		n.cfg.Logger.Warnf("transport lost: %v", err)
 		n.born = false
 		n.setState(Disconnected)
+		n.mu.Unlock()
+		n.notify()
 	}
 }
 
+// setState changes the state and queues the transition for notify, which
+// the caller runs once it holds none of the node's locks. Called with n.mu
+// held.
 func (n *Node) setState(s State) {
 	old := n.state
 	n.state = s
 	if old != s {
 		n.cfg.Logger.Infof("state: %s -> %s", old, s)
-		n.cfg.Metrics.OnStateChange(old, s)
-		if n.cfg.OnState != nil {
-			n.cfg.OnState(old, s)
-		}
+		n.transitions.Push(transition{old, s})
 	}
+}
+
+// notify delivers the queued state transitions to Metrics.OnStateChange and
+// OnState, in order. Called with none of the node's locks held.
+func (n *Node) notify() {
+	n.transitions.Deliver(func(tr transition) {
+		callback.Run(n.cfg.Logger, "Metrics.OnStateChange", func() { n.cfg.Metrics.OnStateChange(tr.old, tr.new) })
+		if n.cfg.OnState != nil {
+			callback.Run(n.cfg.Logger, "Config.OnState", func() { n.cfg.OnState(tr.old, tr.new) })
+		}
+	})
 }
 
 func (n *Node) buildNDEATH() *pb.Payload {
@@ -747,14 +861,14 @@ func (n *Node) handleMessage(topicStr string, data []byte) {
 		return
 	}
 
-	n.cfg.Metrics.OnMessage(t.Type.String())
+	callback.Run(n.cfg.Logger, "Metrics.OnMessage", func() { n.cfg.Metrics.OnMessage(t.Type.String()) })
 
 	switch t.Type {
 	case topic.NCMD:
 		n.handleNCMD(p)
 	case topic.DCMD:
 		if n.cfg.OnDeviceCmd != nil {
-			n.cfg.OnDeviceCmd(t.DeviceID, p.Metrics)
+			callback.Run(n.cfg.Logger, "Config.OnDeviceCmd", func() { n.cfg.OnDeviceCmd(t.DeviceID, p.Metrics) })
 		}
 	}
 }
@@ -821,6 +935,22 @@ func mergeTemplate(b, d *pb.Payload_Template) *pb.Payload_Template {
 	return out
 }
 
+// validID reports whether id can be an ID segment of a Sparkplug topic: not
+// empty, valid UTF-8, and without '/', '+' or '#'.
+func validID(id string) bool {
+	_, err := topic.Parse(topic.ForState(id))
+	return err == nil
+}
+
+// cloneSlice returns deep copies of metrics.
+func cloneSlice(metrics []*pb.Payload_Metric) []*pb.Payload_Metric {
+	out := make([]*pb.Payload_Metric, len(metrics))
+	for i, m := range metrics {
+		out[i] = proto.Clone(m).(*pb.Payload_Metric)
+	}
+	return out
+}
+
 func hasMetric(metrics []*pb.Payload_Metric, name string) bool {
 	for _, m := range metrics {
 		if m.GetName() == name {
@@ -853,7 +983,7 @@ func (n *Node) handleNCMD(p *pb.Payload) {
 		}
 	}
 	if n.cfg.OnNodeCmd != nil {
-		n.cfg.OnNodeCmd("", p.Metrics)
+		callback.Run(n.cfg.Logger, "Config.OnNodeCmd", func() { n.cfg.OnNodeCmd("", p.Metrics) })
 	}
 }
 
@@ -886,6 +1016,7 @@ func (n *Node) handleState(topicStr string, data []byte) {
 		walk = true
 	}
 	n.mu.Unlock()
+	n.notify()
 
 	if walk {
 		go n.walkServers()
@@ -913,7 +1044,7 @@ func (n *Node) walkServers() {
 
 	for attempt := 0; ; attempt++ {
 		n.mu.Lock()
-		if n.state == Closed {
+		if n.closed {
 			n.mu.Unlock()
 			return
 		}
@@ -929,13 +1060,16 @@ func (n *Node) walkServers() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		err := n.Connect(ctx)
 		cancel()
-		n.cfg.Metrics.OnConnect(url, time.Since(start), err)
+		callback.Run(n.cfg.Logger, "Metrics.OnConnect", func() { n.cfg.Metrics.OnConnect(url, time.Since(start), err) })
 		if err == nil || errors.Is(err, ErrClosed) {
 			return
 		}
 		n.cfg.Logger.Warnf("walk connect failed: %v", err)
 
-		retry, wait := n.cfg.RetryPolicy.ShouldRetry(attempt, err)
+		// A RetryPolicy that does not return normally ends the walk.
+		var retry bool
+		var wait time.Duration
+		callback.Run(n.cfg.Logger, "RetryPolicy.ShouldRetry", func() { retry, wait = n.cfg.RetryPolicy.ShouldRetry(attempt, err) })
 		if !retry {
 			n.cfg.Logger.Errorf("walk giving up after %d attempts", attempt+1)
 			return

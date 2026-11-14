@@ -280,7 +280,8 @@ func TestIntegerOfAnotherKind(t *testing.T) {
 		t.Errorf("metric: %v, %v", got, err)
 	}
 	d := &pb.Payload_Metric{Value: &pb.Payload_Metric_DatasetValue{DatasetValue: &pb.Payload_DataSet{
-		Types: []uint32{dt},
+		Columns: []string{"c"},
+		Types:   []uint32{dt},
 		Rows: []*pb.Payload_DataSet_Row{{Elements: []*pb.Payload_DataSet_DataSetValue{
 			{Value: &pb.Payload_DataSet_DataSetValue_StringValue{StringValue: "8"}},
 		}}},
@@ -348,7 +349,8 @@ func TestDataSetTypedRoundTrip(t *testing.T) {
 
 func TestDataSetCellBeyondTypes(t *testing.T) {
 	m := &pb.Payload_Metric{Value: &pb.Payload_Metric_DatasetValue{DatasetValue: &pb.Payload_DataSet{
-		Types: []uint32{uint32(pb.DataType_Int8)},
+		Columns: []string{"a"},
+		Types:   []uint32{uint32(pb.DataType_Int8)},
 		Rows: []*pb.Payload_DataSet_Row{{Elements: []*pb.Payload_DataSet_DataSetValue{
 			{Value: &pb.Payload_DataSet_DataSetValue_IntValue{IntValue: 1}},
 			{Value: &pb.Payload_DataSet_DataSetValue_IntValue{IntValue: 2}},

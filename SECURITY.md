@@ -22,8 +22,11 @@ authentication and authorization are those of the MQTT connection and the
 broker's access control.
 
 Anything received from the broker is untrusted: topics, Protobuf payloads and
-the JSON of STATE messages. `payload.Decode` and `topic.Parse` have fuzz
-targets (`make fuzz`).
+the JSON of STATE messages. The decoders, the getters of `payload`, the
+template checks, `topic.Parse` and the message handling of the three runtimes
+have fuzz targets (`make fuzz`, [TESTING.md](TESTING.md#fuzz-targets-and-budgets)).
+Application code that the runtimes call and that does not return normally is
+logged and does not stop them ([API.md](API.md#callbacks)).
 
 ## Secure defaults
 
@@ -43,8 +46,9 @@ targets (`make fuzz`).
 |---|---|---|
 | Elements of a BooleanArray or StringArray (`payload.GetValue`) | `payload.MaxArrayElements` (1 << 20) | none |
 | Bytes of a string or StringArray element (`payload.GetValue`) | `payload.MaxStringBytes` (1 << 24) | none |
-| Messages held per edge node for reordering (`host`, `app`) | 256, at most 30 seconds | none |
-| Pending rebirth requests per node (`host`, `app`) | one, for the next NBIRTH or 2 seconds | none |
+| Template nesting (`payload.NewTemplateDefs`, `TemplateDefs.Check`, and so `host` and `app` on receipt) | 32 levels: deeper is `ErrInvalidTemplate` | none |
+| Messages held for reordering (`host`, `app`) | 256 per edge node; 4096, and 8 MiB of payload, over all edge nodes, the oldest dropped first; a message above 8 MiB is not held; every held message at most 30 seconds, of every edge node | none |
+| Pending rebirth requests (`host`, `app`) | one per node, for the next NBIRTH or 2 seconds; 16 on their way over all nodes | none |
 | Connect timeout (`PahoTransport`) | 10 s | `ConnectTimeout` |
 | Publish and subscribe timeout (`PahoTransport`) | 5 s | `PublishTimeout` |
 
@@ -57,3 +61,7 @@ Gosec and Opengrep scans run on a maintainer's machine before each release, with
 - No library limit on the size of a received payload: `payload.Decode` takes what
   the broker delivers, so bound the message size at the broker. The limits above apply
   afterwards, in `payload.GetValue`, and not to DataSet cells or template parameters.
+- `MaxArrayElements` bounds the elements of a StringArray, not the memory of the
+  decoded slice: each element takes a string header besides its bytes, and the
+  elements are counted as they are decoded (`TestDecodeLimitsAllocationBudget`
+  has the budget).

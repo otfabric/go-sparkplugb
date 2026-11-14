@@ -12,7 +12,8 @@ var ErrColumnMismatch = errors.New("sparkplugb: column count mismatch")
 
 // NewDataSet creates a DataSet metric. columns defines the column names,
 // types the DataType for each column, and rows is a [][]any where each
-// inner slice has one value per column.
+// inner slice has one value per column. The metric keeps columns as it is,
+// not a copy; types and rows are encoded into it.
 //
 // A value has the Go type GetValue returns for its column's datatype. For an
 // integer column the wire type, uint32 or uint64, is also taken, as long as it
@@ -69,8 +70,13 @@ func NewDataSet(name string, columns []string, types []pb.DataType, rows [][]any
 // GetDataSetValues extracts all rows from a DataSet metric as [][]any. A value
 // has the Go type GetValue returns for its column's datatype: integers and
 // DateTime are decoded by the rules of GetValue, and one that is not a value of
-// its column returns ErrTypeMismatch. A cell without a value is nil. A row with
-// more cells than the DataSet has types returns ErrColumnMismatch.
+// its column, or a value carried in another field than its column's datatype
+// has, returns ErrTypeMismatch. A cell without a value is nil; a cell with a
+// value in a column whose type is not a basic datatype (Int8 to Text) returns
+// ErrUnknownType. A DataSet whose columns and types differ in count, or
+// whose num_of_columns differs from them, and a row with more cells than the
+// DataSet has types, return ErrColumnMismatch. columns is the DataSet's own
+// slice, not a copy; types and rows are new.
 func GetDataSetValues(m *pb.Payload_Metric) (columns []string, types []pb.DataType, rows [][]any, err error) {
 	if m == nil {
 		return nil, nil, nil, ErrNilMetric
@@ -78,6 +84,10 @@ func GetDataSetValues(m *pb.Payload_Metric) (columns []string, types []pb.DataTy
 	ds := m.GetDatasetValue()
 	if ds == nil {
 		return nil, nil, nil, ErrTypeMismatch
+	}
+	if len(ds.GetColumns()) != len(ds.GetTypes()) ||
+		(ds.NumOfColumns != nil && ds.GetNumOfColumns() != uint64(len(ds.GetColumns()))) {
+		return nil, nil, nil, ErrColumnMismatch
 	}
 
 	columns = ds.GetColumns()
@@ -161,22 +171,30 @@ func extractDataSetValue(dt pb.DataType, dsv *pb.Payload_DataSet_DataSetValue) (
 		}
 		return nil, ErrTypeMismatch
 	}
-	switch v := dsv.Value.(type) {
-	case *pb.Payload_DataSet_DataSetValue_IntValue:
-		return v.IntValue, nil
-	case *pb.Payload_DataSet_DataSetValue_LongValue:
-		return v.LongValue, nil
-	case *pb.Payload_DataSet_DataSetValue_FloatValue:
-		return v.FloatValue, nil
-	case *pb.Payload_DataSet_DataSetValue_DoubleValue:
-		return v.DoubleValue, nil
-	case *pb.Payload_DataSet_DataSetValue_BooleanValue:
-		return v.BooleanValue, nil
-	case *pb.Payload_DataSet_DataSetValue_StringValue:
-		return v.StringValue, nil
-	default:
+	if dsv.Value == nil {
 		return nil, nil
 	}
+	switch dt {
+	case pb.DataType_Float:
+		if v, ok := dsv.Value.(*pb.Payload_DataSet_DataSetValue_FloatValue); ok {
+			return v.FloatValue, nil
+		}
+	case pb.DataType_Double:
+		if v, ok := dsv.Value.(*pb.Payload_DataSet_DataSetValue_DoubleValue); ok {
+			return v.DoubleValue, nil
+		}
+	case pb.DataType_Boolean:
+		if v, ok := dsv.Value.(*pb.Payload_DataSet_DataSetValue_BooleanValue); ok {
+			return v.BooleanValue, nil
+		}
+	case pb.DataType_String, pb.DataType_Text:
+		if v, ok := dsv.Value.(*pb.Payload_DataSet_DataSetValue_StringValue); ok {
+			return v.StringValue, nil
+		}
+	default:
+		return nil, ErrUnknownType
+	}
+	return nil, ErrTypeMismatch
 }
 
 func uint64Ptr(v uint64) *uint64 { return &v }

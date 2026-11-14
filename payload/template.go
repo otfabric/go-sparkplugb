@@ -8,6 +8,8 @@ import (
 
 // NewTemplateDefinition creates a template definition metric.
 // A definition has is_definition=true, a version, and member metrics.
+// The metric keeps metrics and params, and the members and parameters they
+// point to, as they are: they are not copied.
 func NewTemplateDefinition(name, version string, metrics []*pb.Payload_Metric, params []*pb.Payload_Template_Parameter) (*pb.Payload_Metric, error) {
 	isDef := true
 	tmpl := &pb.Payload_Template{
@@ -28,6 +30,7 @@ func NewTemplateDefinition(name, version string, metrics []*pb.Payload_Metric, p
 
 // NewTemplateInstance creates a template instance metric.
 // An instance has template_ref set to the definition name, optional parameter overrides.
+// The metric keeps metrics and params as they are: they are not copied.
 func NewTemplateInstance(name, templateRef string, metrics []*pb.Payload_Metric, params []*pb.Payload_Template_Parameter) (*pb.Payload_Metric, error) {
 	isDef := false
 	tmpl := &pb.Payload_Template{
@@ -103,9 +106,10 @@ func NewTemplateParameter(name string, dt pb.DataType, v any) (*pb.Payload_Templ
 
 // GetTemplateParameterValue extracts the Go value from a template parameter. It
 // has the Go type GetValue returns for the datatype: integers and DateTime are
-// decoded by the rules of GetValue, and one that is not a value of the datatype
-// returns ErrTypeMismatch. The members of a template are metrics: GetValue reads
-// them.
+// decoded by the rules of GetValue, and one that is not a value of the datatype,
+// or a value carried in another field than the datatype's, returns
+// ErrTypeMismatch. A parameter without a value reads as the zero value. The
+// members of a template are metrics: GetValue reads them.
 func GetTemplateParameterValue(p *pb.Payload_Template_Parameter) (any, error) {
 	if p == nil {
 		return nil, ErrNilMetric
@@ -126,14 +130,35 @@ func GetTemplateParameterValue(p *pb.Payload_Template_Parameter) (any, error) {
 
 	switch dt {
 	case pb.DataType_Float:
-		return p.GetFloatValue(), nil
+		switch v := p.Value.(type) {
+		case nil:
+			return float32(0), nil
+		case *pb.Payload_Template_Parameter_FloatValue:
+			return v.FloatValue, nil
+		}
 	case pb.DataType_Double:
-		return p.GetDoubleValue(), nil
+		switch v := p.Value.(type) {
+		case nil:
+			return float64(0), nil
+		case *pb.Payload_Template_Parameter_DoubleValue:
+			return v.DoubleValue, nil
+		}
 	case pb.DataType_Boolean:
-		return p.GetBooleanValue(), nil
+		switch v := p.Value.(type) {
+		case nil:
+			return false, nil
+		case *pb.Payload_Template_Parameter_BooleanValue:
+			return v.BooleanValue, nil
+		}
 	case pb.DataType_String, pb.DataType_Text:
-		return p.GetStringValue(), nil
+		switch v := p.Value.(type) {
+		case nil:
+			return "", nil
+		case *pb.Payload_Template_Parameter_StringValue:
+			return v.StringValue, nil
+		}
 	default:
 		return nil, ErrUnknownType
 	}
+	return nil, ErrTypeMismatch
 }

@@ -68,6 +68,19 @@ const (
 	DateTimeArray   = pb.DataType_DateTimeArray
 )
 
+// GetValue returns the value of m as the Go type of its datatype: int8 to
+// int64 and uint8 to uint64 for the integers, time.Time for DateTime, float32,
+// float64, bool, string for String, Text and UUID, []byte for Bytes and File,
+// *pb.Payload_DataSet, *pb.Payload_Template, and a slice of the element type
+// for an array. A metric with is_null set is nil. A metric without a value
+// reads as the zero value of its type, and an array as one decoded from no
+// bytes.
+//
+// A value carried in another field than its datatype's, a string in a Float
+// metric for one, returns ErrTypeMismatch, as does an integer out of the
+// datatype's range. The []byte of Bytes and File, the DataSet and the
+// Template are the metric's own: they change with it. Arrays are decoded
+// into new slices.
 func GetValue(m *pb.Payload_Metric) (any, error) {
 	if m == nil {
 		return nil, ErrNilMetric
@@ -87,57 +100,117 @@ func GetValue(m *pb.Payload_Metric) (any, error) {
 		}
 		return decodeInteger(dt, v)
 	case pb.DataType_Float:
-		return m.GetFloatValue(), nil
+		switch v := m.GetValue().(type) {
+		case nil:
+			return float32(0), nil
+		case *pb.Payload_Metric_FloatValue:
+			return v.FloatValue, nil
+		}
+		return nil, ErrTypeMismatch
 	case pb.DataType_Double:
-		return m.GetDoubleValue(), nil
+		switch v := m.GetValue().(type) {
+		case nil:
+			return float64(0), nil
+		case *pb.Payload_Metric_DoubleValue:
+			return v.DoubleValue, nil
+		}
+		return nil, ErrTypeMismatch
 	case pb.DataType_Boolean:
-		return m.GetBooleanValue(), nil
+		switch v := m.GetValue().(type) {
+		case nil:
+			return false, nil
+		case *pb.Payload_Metric_BooleanValue:
+			return v.BooleanValue, nil
+		}
+		return nil, ErrTypeMismatch
 	case pb.DataType_String, pb.DataType_Text, pb.DataType_UUID:
-		if len(m.GetStringValue()) > MaxStringBytes {
+		var s string
+		switch v := m.GetValue().(type) {
+		case nil:
+		case *pb.Payload_Metric_StringValue:
+			s = v.StringValue
+		default:
+			return nil, ErrTypeMismatch
+		}
+		if len(s) > MaxStringBytes {
 			return nil, ErrStringTooLarge
 		}
-		return m.GetStringValue(), nil
+		return s, nil
 	case pb.DataType_Bytes, pb.DataType_File:
-		return m.GetBytesValue(), nil
+		return bytesValue(m)
 	case pb.DataType_DataSet:
-		return m.GetDatasetValue(), nil
+		switch v := m.GetValue().(type) {
+		case nil:
+			return (*pb.Payload_DataSet)(nil), nil
+		case *pb.Payload_Metric_DatasetValue:
+			return v.DatasetValue, nil
+		}
+		return nil, ErrTypeMismatch
 	case pb.DataType_Template:
-		return m.GetTemplateValue(), nil
+		switch v := m.GetValue().(type) {
+		case nil:
+			return (*pb.Payload_Template)(nil), nil
+		case *pb.Payload_Metric_TemplateValue:
+			return v.TemplateValue, nil
+		}
+		return nil, ErrTypeMismatch
+	}
 
-	// Array types
+	if !isArrayType(dt) {
+		return nil, ErrUnknownType
+	}
+	b, err := bytesValue(m)
+	if err != nil {
+		return nil, err
+	}
+	switch dt {
 	case pb.DataType_Int8Array:
-		return decodeInt8Array(m.GetBytesValue())
+		return decodeInt8Array(b)
 	case pb.DataType_Int16Array:
-		return decodeInt16Array(m.GetBytesValue())
+		return decodeInt16Array(b)
 	case pb.DataType_Int32Array:
-		return decodeInt32Array(m.GetBytesValue())
+		return decodeInt32Array(b)
 	case pb.DataType_Int64Array:
-		return decodeInt64Array(m.GetBytesValue())
+		return decodeInt64Array(b)
 	case pb.DataType_UInt8Array:
-		b := m.GetBytesValue()
 		out := make([]uint8, len(b))
 		copy(out, b)
 		return out, nil
 	case pb.DataType_UInt16Array:
-		return decodeUInt16Array(m.GetBytesValue())
+		return decodeUInt16Array(b)
 	case pb.DataType_UInt32Array:
-		return decodeUInt32Array(m.GetBytesValue())
+		return decodeUInt32Array(b)
 	case pb.DataType_UInt64Array:
-		return decodeUInt64Array(m.GetBytesValue())
+		return decodeUInt64Array(b)
 	case pb.DataType_FloatArray:
-		return decodeFloatArray(m.GetBytesValue())
+		return decodeFloatArray(b)
 	case pb.DataType_DoubleArray:
-		return decodeDoubleArray(m.GetBytesValue())
+		return decodeDoubleArray(b)
 	case pb.DataType_BooleanArray:
-		return decodeBooleanArray(m.GetBytesValue())
+		return decodeBooleanArray(b)
 	case pb.DataType_StringArray:
-		return decodeStringArray(m.GetBytesValue())
-	case pb.DataType_DateTimeArray:
-		return decodeDateTimeArray(m.GetBytesValue())
-
-	default:
-		return nil, ErrUnknownType
+		return decodeStringArray(b)
+	default: // DateTimeArray
+		return decodeDateTimeArray(b)
 	}
+}
+
+// isArrayType reports whether dt is one of the array datatypes, which are
+// carried in bytes_value.
+func isArrayType(dt pb.DataType) bool {
+	return dt >= pb.DataType_Int8Array && dt <= pb.DataType_DateTimeArray
+}
+
+// bytesValue returns the bytes_value of m: nil for a metric without a value,
+// ErrTypeMismatch for one whose value is of another kind.
+func bytesValue(m *pb.Payload_Metric) ([]byte, error) {
+	switch v := m.GetValue().(type) {
+	case nil:
+		return nil, nil
+	case *pb.Payload_Metric_BytesValue:
+		return v.BytesValue, nil
+	}
+	return nil, ErrTypeMismatch
 }
 
 // integer returns an integer metric value from whichever of int_value and
@@ -157,6 +230,13 @@ func integer(m *pb.Payload_Metric) (uint64, error) {
 	return 0, ErrTypeMismatch
 }
 
+// SetValue sets the datatype of m to dt and its value to v, which has the Go
+// type GetValue returns for dt; a nil v sets is_null. The []byte of Bytes and
+// File, the DataSet and the Template are kept, not copied: they become the
+// metric's own, and change with it. Arrays, UInt8Array included, are encoded
+// into new bytes. A v of another Go type, or an integer out of the
+// datatype's range, returns ErrTypeMismatch; a datatype the codec does not
+// know returns ErrUnknownType.
 func SetValue(m *pb.Payload_Metric, dt pb.DataType, v any) error {
 	if m == nil {
 		return ErrNilMetric

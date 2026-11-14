@@ -12,6 +12,7 @@ import (
 	"time"
 
 	sparkplugb "github.com/otfabric/go-sparkplugb"
+	"github.com/otfabric/go-sparkplugb/internal/callback"
 	"github.com/otfabric/go-sparkplugb/mqtt"
 	"github.com/otfabric/go-sparkplugb/payload"
 	pb "github.com/otfabric/go-sparkplugb/proto"
@@ -42,8 +43,28 @@ func (s State) String() string {
 	return "unknown"
 }
 
+// StateHandler is called with each transition of the application's state,
+// in the order of the transitions and one call at a time, after the
+// application has released its locks: on the goroutine that made the
+// transition (the caller of Connect, Disconnect or Close, or the
+// transport's when the connection is lost), or on one that was delivering
+// an earlier transition when it was made. It may call the application,
+// Close and Connect included; a transition such a call makes is delivered
+// after the handler returns. Disconnected after Disconnect, or after a
+// Connect that failed, is delivered once the application has ended the
+// connection, so a Connect from the handler is not ended with it. A handler
+// that does not return normally is logged with its stack, and the
+// application goes on.
 type StateHandler func(old, new State)
 
+// NodeHandler is called with the metrics of an NBIRTH or NDATA, DeviceHandler
+// with those of a DBIRTH or DDATA, NodeEventHandler for an NDEATH and
+// DeviceEventHandler for a DDEATH. They are called on the transport's
+// goroutine, without a lock of the application held, so they may call the
+// application; the next message waits until they return, so they should
+// not block. The metrics are the handler's: the application keeps copies of
+// what it stores. A handler that does not return normally is logged with
+// its stack, and the application goes on with the next message.
 type NodeHandler func(groupID, nodeID string, metrics []*pb.Payload_Metric)
 type DeviceHandler func(groupID, nodeID, deviceID string, metrics []*pb.Payload_Metric)
 type NodeEventHandler func(groupID, nodeID string)
@@ -101,10 +122,12 @@ type Application struct {
 	cfg       Config
 	transport mqtt.Transport
 
-	mu      sync.RWMutex
-	state   State
-	nodes   map[string]*EdgeNodeState
-	closeCh chan struct{}
+	mu          sync.RWMutex
+	state       State
+	closed      bool // Close was called: Connect refuses, and one in progress ends with ErrClosed
+	nodes       map[string]*EdgeNodeState
+	closeCh     chan struct{}
+	transitions callback.Queue[transition] // state transitions not yet delivered (notify)
 
 	rebirthAsked  map[string]time.Time            // nodeKey -> last rebirth request the application made itself
 	rebirthMissed map[string]bool                 // nodeKey -> a request was throttled while one was pending
@@ -115,7 +138,16 @@ type Application struct {
 	sessionTimers map[string]*time.Timer          // nodeKey -> pending wait for an NBIRTH
 	sessionWait   time.Duration                   // sessionWait, shorter in tests
 	lateBirthWait time.Duration                   // lateBirthWait, shorter in tests
+
+	heldCount        int       // messages in held, over every node
+	heldBytes        int       // their payload bytes
+	heldDropped      uint64    // held messages dropped for maxHeldTotal and maxHeldBytes
+	lastSweep        time.Time // when sweep last ran
+	rebirthsInFlight int       // rebirth requests being sent (askRebirth)
 }
+
+// transition is a change of the application's state, for StateHandler.
+type transition struct{ old, new State }
 
 func New(transport mqtt.Transport, cfg Config) (*Application, error) {
 	if cfg.BrokerURL == "" && len(cfg.ServerURLs) == 0 {
@@ -130,7 +162,7 @@ func New(transport mqtt.Transport, cfg Config) (*Application, error) {
 	if cfg.Metrics == nil {
 		cfg.Metrics = NopMetrics{}
 	}
-	cfg.Logger = sparkplugb.ComponentLogger(cfg.Logger, "app")
+	cfg.Logger = callback.Logger(sparkplugb.ComponentLogger(cfg.Logger, "app"))
 
 	return &Application{
 		cfg:       cfg,
@@ -156,12 +188,13 @@ func randomClientID() string {
 
 func (a *Application) Connect(ctx context.Context) error {
 	a.mu.Lock()
-	if a.state == Closed {
+	if a.closed {
 		a.mu.Unlock()
 		return ErrClosed
 	}
 	a.setState(Connecting)
 	a.mu.Unlock()
+	a.notify()
 
 	brokerURL := a.cfg.BrokerURL
 	if brokerURL == "" && len(a.cfg.ServerURLs) > 0 {
@@ -179,29 +212,61 @@ func (a *Application) Connect(ctx context.Context) error {
 	})
 	if err != nil {
 		a.mu.Lock()
-		a.setState(Disconnected)
+		closed := a.closed
+		if !closed {
+			a.setState(Disconnected)
+		}
 		a.mu.Unlock()
+		a.notify()
+		if closed {
+			return ErrClosed
+		}
 		return fmt.Errorf("sparkplugb: application connect: %w", err)
+	}
+	if a.isClosed() {
+		return a.abortConnect(ctx, ErrClosed)
 	}
 
 	if err := a.transport.Subscribe(ctx, topic.Namespace+"/#", 0, a.handleMessage); err != nil {
-		// Left up, the connection kept the application in Connecting, and
-		// the next Connect opened a second one beside it.
-		a.mu.Lock()
-		if a.state != Closed {
-			a.setState(Disconnected)
-		}
-		a.stopSessionTimers()
-		a.mu.Unlock()
-		_ = a.transport.Disconnect(context.WithoutCancel(ctx))
-		return fmt.Errorf("sparkplugb: subscribe spBv1.0/#: %w", err)
+		return a.abortConnect(ctx, fmt.Errorf("sparkplugb: subscribe spBv1.0/#: %w", err))
 	}
 
 	a.mu.Lock()
+	if a.closed {
+		a.mu.Unlock()
+		return a.abortConnect(ctx, ErrClosed)
+	}
 	a.setState(Connected)
 	a.mu.Unlock()
+	a.notify()
 
 	return nil
+}
+
+// isClosed reports whether Close was called.
+func (a *Application) isClosed() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.closed
+}
+
+// abortConnect ends a connection on which the session could not be set up,
+// or that Close ended meanwhile, and returns err. Left up, the connection
+// kept the application in Connecting, and the next Connect opened a second
+// one beside it.
+func (a *Application) abortConnect(ctx context.Context, err error) error {
+	a.mu.Lock()
+	if a.state != Closed {
+		a.setState(Disconnected)
+	}
+	a.stopSessionTimers()
+	a.mu.Unlock()
+	_ = a.transport.Disconnect(context.WithoutCancel(ctx))
+	// Delivered once the connection has ended: a StateHandler that calls
+	// Connect when the application is Disconnected starts on a transport
+	// that is free, and its connection is not the one ended here.
+	a.notify()
+	return err
 }
 
 func (a *Application) Disconnect(ctx context.Context) error {
@@ -214,15 +279,23 @@ func (a *Application) Disconnect(ctx context.Context) error {
 	a.stopSessionTimers()
 	a.mu.Unlock()
 
-	return a.transport.Disconnect(ctx)
+	err := a.transport.Disconnect(ctx)
+	a.notify() // once the connection has ended, as in abortConnect
+	return err
 }
 
+// Close disconnects the application, as Disconnect does, and closes it:
+// Connect then returns ErrClosed, and a Connect in progress ends with
+// ErrClosed and leaves no connection up. Close is safe to call more than
+// once and from several goroutines: the first call closes the application,
+// the others return nil at once.
 func (a *Application) Close(ctx context.Context) error {
 	a.mu.Lock()
-	if a.state == Closed {
+	if a.closed {
 		a.mu.Unlock()
 		return nil
 	}
+	a.closed = true
 	a.mu.Unlock()
 
 	err := a.Disconnect(ctx)
@@ -230,6 +303,7 @@ func (a *Application) Close(ctx context.Context) error {
 	a.setState(Closed)
 	close(a.closeCh)
 	a.mu.Unlock()
+	a.notify()
 	return err
 }
 
@@ -338,25 +412,38 @@ func (a *Application) ResolveAlias(groupID, nodeID string, alias uint64) (string
 
 func (a *Application) onConnectionLost(err error) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	if a.state == Closed || a.state == Disconnected {
+		a.mu.Unlock()
 		return
 	}
 	a.cfg.Logger.Warnf("transport lost: %v", err)
 	a.stopSessionTimers()
 	a.setState(Disconnected)
+	a.mu.Unlock()
+	a.notify()
 }
 
+// setState changes the state and queues the transition for notify, which
+// the caller runs once it holds none of the application's locks. Called
+// with a.mu held.
 func (a *Application) setState(s State) {
 	old := a.state
 	a.state = s
 	if old != s {
 		a.cfg.Logger.Infof("application state: %s -> %s", old, s)
-		a.cfg.Metrics.OnStateChange(old, s)
-		if a.cfg.OnState != nil {
-			a.cfg.OnState(old, s)
-		}
+		a.transitions.Push(transition{old, s})
 	}
+}
+
+// notify delivers the queued state transitions to Metrics.OnStateChange and
+// OnState, in order. Called with none of the application's locks held.
+func (a *Application) notify() {
+	a.transitions.Deliver(func(tr transition) {
+		callback.Run(a.cfg.Logger, "Metrics.OnStateChange", func() { a.cfg.Metrics.OnStateChange(tr.old, tr.new) })
+		if a.cfg.OnState != nil {
+			callback.Run(a.cfg.Logger, "Config.OnState", func() { a.cfg.OnState(tr.old, tr.new) })
+		}
+	})
 }
 
 func (a *Application) handleMessage(topicStr string, data []byte) {
@@ -462,6 +549,8 @@ func (a *Application) hold(t topic.Topic, data []byte) bool {
 	key := nodeKey(t.GroupID, t.EdgeNodeID)
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	now := time.Now()
+	a.sweep(now)
 	ns := a.nodes[key]
 	behind := false
 	if ns != nil {
@@ -477,13 +566,13 @@ func (a *Application) hold(t topic.Topic, data []byte) bool {
 		}
 		behind = (seq-expected+256)%256 > 128
 	}
-	if a.held == nil {
-		a.held = make(map[string][]heldMsg)
-	}
-	if len(a.held[key]) >= maxHeld {
+	if len(a.held[key]) >= maxHeld || len(data) > maxHeldBytes {
 		return false
 	}
-	a.held[key] = append(a.held[key], heldMsg{t: t, seq: seq, data: data, ts: ts, at: time.Now(), nextSession: behind})
+	for a.heldCount >= maxHeldTotal || a.heldBytes+len(data) > maxHeldBytes {
+		a.dropOldestHeld()
+	}
+	a.setHeld(key, append(a.held[key], heldMsg{t: t, seq: seq, data: data, ts: ts, at: now, nextSession: behind}))
 	switch {
 	case behind:
 		a.expectSession(t)
@@ -493,6 +582,102 @@ func (a *Application) hold(t topic.Topic, data []byte) bool {
 		a.validateSeq(ns, seq, t) // starts the reorder timer or requests a rebirth
 	}
 	return true
+}
+
+// maxHeldTotal and maxHeldBytes bound the messages held for reordering over
+// every edge node, known or not, by count and by payload bytes. When a
+// message would pass either, the oldest held message is dropped; a message
+// larger than maxHeldBytes by itself is not held.
+const (
+	maxHeldTotal = 4096
+	maxHeldBytes = 8 << 20
+)
+
+// setHeld sets the held messages of key, keeping heldCount and heldBytes,
+// and deletes the key when none is left. Called with a.mu held.
+func (a *Application) setHeld(key string, msgs []heldMsg) {
+	old := a.held[key]
+	a.heldCount += len(msgs) - len(old)
+	a.heldBytes += heldSize(msgs) - heldSize(old)
+	if len(msgs) == 0 {
+		delete(a.held, key)
+		return
+	}
+	if a.held == nil {
+		a.held = make(map[string][]heldMsg)
+	}
+	a.held[key] = msgs
+}
+
+func heldSize(msgs []heldMsg) int {
+	n := 0
+	for i := range msgs {
+		n += len(msgs[i].data)
+	}
+	return n
+}
+
+// dropOldestHeld drops the held message that arrived first, of any edge
+// node. Called with a.mu held and at least one message held.
+func (a *Application) dropOldestHeld() {
+	var oldestKey string
+	oldest := -1
+	var at time.Time
+	for key, msgs := range a.held {
+		for i := range msgs {
+			if oldest < 0 || msgs[i].at.Before(at) {
+				oldestKey, oldest, at = key, i, msgs[i].at
+			}
+		}
+	}
+	msgs := a.held[oldestKey]
+	kept := make([]heldMsg, 0, len(msgs)-1)
+	kept = append(append(kept, msgs[:oldest]...), msgs[oldest+1:]...)
+	a.setHeld(oldestKey, kept)
+	a.heldDropped++
+	a.cfg.Logger.Debugf("%s: dropped a held %s, seq %d: %d messages, %d bytes held",
+		oldestKey, msgs[oldest].t.Type, msgs[oldest].seq, a.heldCount, a.heldBytes)
+}
+
+// sweepInterval is how often sweep runs, at most.
+const sweepInterval = time.Second
+
+// sweep drops the held messages of every edge node that waited longer than
+// heldMaxAge, and forgets the rebirth requests, throttled requests and
+// deaths whose time has passed, so that edge nodes that send nothing more
+// leave nothing behind. It runs at most once per sweepInterval. Called with
+// a.mu held.
+func (a *Application) sweep(now time.Time) {
+	if now.Sub(a.lastSweep) < sweepInterval {
+		return
+	}
+	a.lastSweep = now
+	for key, msgs := range a.held {
+		var kept []heldMsg
+		for i := range msgs {
+			if now.Sub(msgs[i].at) <= heldMaxAge {
+				kept = append(kept, msgs[i])
+			}
+		}
+		if len(kept) < len(msgs) {
+			a.setHeld(key, kept)
+		}
+	}
+	for key, at := range a.rebirthAsked {
+		if now.Sub(at) >= rebirthInterval {
+			delete(a.rebirthAsked, key)
+		}
+	}
+	for key := range a.rebirthMissed {
+		if _, pending := a.rebirthAsked[key]; !pending && a.nodes[key] == nil {
+			delete(a.rebirthMissed, key)
+		}
+	}
+	for key, d := range a.deaths {
+		if now.Sub(d.at) > a.lateBirthWait {
+			delete(a.deaths, key)
+		}
+	}
 }
 
 // heldMaxAge is how long a held message may wait for the gap before it.
@@ -570,7 +755,7 @@ func (a *Application) drain(t topic.Topic) {
 				kept = append(kept, held[i])
 			}
 		}
-		a.held[key] = kept
+		a.setHeld(key, kept)
 		if found {
 			a.sessions[key].remember(*next)
 		} else {
@@ -654,9 +839,11 @@ func (a *Application) handleNBIRTH(t topic.Topic, data []byte) {
 		a.logWarn("decode NBIRTH from %s/%s: %v", t.GroupID, t.EdgeNodeID, err)
 		return
 	}
+	// The application keeps copies: the metrics of p are OnNodeBirth's.
+	stored := cloneSlice(p.Metrics)
 	// A template that breaks Sparkplug is reported, and the NBIRTH is still
 	// applied: the invalid definitions are left out of templates.
-	templates, err := payload.NewTemplateDefs(p.Metrics)
+	templates, err := payload.NewTemplateDefs(stored)
 	if err != nil {
 		a.logWarn("NBIRTH from %s/%s: %v", t.GroupID, t.EdgeNodeID, err)
 	}
@@ -666,10 +853,7 @@ func (a *Application) handleNBIRTH(t topic.Topic, data []byte) {
 		a.mu.Unlock()
 		a.cfg.Logger.Debugf("%s/%s: dropped NBIRTH: its session has ended", t.GroupID, t.EdgeNodeID)
 		if died {
-			a.cfg.Metrics.OnNodeDeath(t.GroupID, t.EdgeNodeID)
-			if a.cfg.OnNodeDeath != nil {
-				a.cfg.OnNodeDeath(t.GroupID, t.EdgeNodeID)
-			}
+			a.nodeDied(t)
 		}
 		return
 	}
@@ -683,7 +867,7 @@ func (a *Application) handleNBIRTH(t topic.Topic, data []byte) {
 		Devices:    make(map[string]*DeviceState),
 		Aliases:    make(map[uint64]string),
 	}
-	for _, m := range p.Metrics {
+	for _, m := range stored {
 		if m.GetName() == "bdSeq" {
 			ns.BdSeq = m.GetLongValue()
 		} else {
@@ -717,10 +901,7 @@ func (a *Application) handleNBIRTH(t topic.Topic, data []byte) {
 			}
 		}
 		if len(ours) > 0 {
-			if a.held == nil {
-				a.held = make(map[string][]heldMsg)
-			}
-			a.held[key] = append(ours, a.held[key]...) // on a tie, drain takes the held one
+			a.setHeld(key, append(ours, a.held[key]...)) // on a tie, drain takes the held one
 		}
 	}
 	a.sessions[key] = &session{birthTS: birthTS, bornAt: time.Now()}
@@ -738,13 +919,22 @@ func (a *Application) handleNBIRTH(t topic.Topic, data []byte) {
 			m.nextSession = false // this NBIRTH starts their session
 			kept = append(kept, m)
 		}
-		a.held[key] = kept
+		a.setHeld(key, kept)
 	}
 	a.mu.Unlock()
 
-	a.cfg.Metrics.OnNodeBirth(t.GroupID, t.EdgeNodeID)
+	callback.Run(a.cfg.Logger, "Metrics.OnNodeBirth", func() { a.cfg.Metrics.OnNodeBirth(t.GroupID, t.EdgeNodeID) })
 	if a.cfg.OnNodeBirth != nil {
-		a.cfg.OnNodeBirth(t.GroupID, t.EdgeNodeID, p.Metrics)
+		callback.Run(a.cfg.Logger, "Config.OnNodeBirth", func() { a.cfg.OnNodeBirth(t.GroupID, t.EdgeNodeID, p.Metrics) })
+	}
+}
+
+// nodeDied reports the death of the edge node of t to Metrics.OnNodeDeath
+// and OnNodeDeath. Called with none of the application's locks held.
+func (a *Application) nodeDied(t topic.Topic) {
+	callback.Run(a.cfg.Logger, "Metrics.OnNodeDeath", func() { a.cfg.Metrics.OnNodeDeath(t.GroupID, t.EdgeNodeID) })
+	if a.cfg.OnNodeDeath != nil {
+		callback.Run(a.cfg.Logger, "Config.OnNodeDeath", func() { a.cfg.OnNodeDeath(t.GroupID, t.EdgeNodeID) })
 	}
 }
 
@@ -756,6 +946,7 @@ func (a *Application) handleNDEATH(t topic.Topic, data []byte) {
 	}
 
 	a.mu.Lock()
+	a.sweep(time.Now())
 	key := nodeKey(t.GroupID, t.EdgeNodeID)
 	if bd, ok := bdSeqOf(p); ok {
 		if a.deaths == nil {
@@ -779,10 +970,7 @@ func (a *Application) handleNDEATH(t topic.Topic, data []byte) {
 	}
 	a.mu.Unlock()
 
-	a.cfg.Metrics.OnNodeDeath(t.GroupID, t.EdgeNodeID)
-	if a.cfg.OnNodeDeath != nil {
-		a.cfg.OnNodeDeath(t.GroupID, t.EdgeNodeID)
-	}
+	a.nodeDied(t)
 }
 
 func (a *Application) handleDBIRTH(t topic.Topic, data []byte) {
@@ -792,26 +980,27 @@ func (a *Application) handleDBIRTH(t topic.Topic, data []byte) {
 		return
 	}
 
+	// The application keeps copies: the metrics of p are OnDeviceBirth's.
+	stored := cloneSlice(p.Metrics)
 	a.mu.Lock()
 	ns := a.nodes[nodeKey(t.GroupID, t.EdgeNodeID)]
 	if ns == nil {
 		a.unknownNode(t)
 	}
+	var defs payload.TemplateDefs
 	if ns != nil {
 		if !a.validateSeq(ns, p.GetSeq(), t) {
 			a.mu.Unlock()
 			return
 		}
-		if err := a.templates[nodeKey(t.GroupID, t.EdgeNodeID)].Check(p.Metrics, true); err != nil {
-			a.logWarn("DBIRTH from %s/%s/%s: %v", t.GroupID, t.EdgeNodeID, t.DeviceID, err)
-		}
+		defs = a.templates[nodeKey(t.GroupID, t.EdgeNodeID)]
 		ds := &DeviceState{
 			DeviceID: t.DeviceID,
 			Online:   ns.Online,
 			Metrics:  make(map[string]*pb.Payload_Metric),
 			Aliases:  make(map[uint64]string),
 		}
-		for _, m := range p.Metrics {
+		for _, m := range stored {
 			ds.Metrics[m.GetName()] = m
 			if m.Alias != nil {
 				ds.Aliases[m.GetAlias()] = m.GetName()
@@ -821,8 +1010,15 @@ func (a *Application) handleDBIRTH(t topic.Topic, data []byte) {
 	}
 	a.mu.Unlock()
 
+	// The definitions of an NBIRTH are not changed once stored: they are
+	// checked against without the lock.
+	if ns != nil {
+		if err := defs.Check(stored, true); err != nil {
+			a.logWarn("DBIRTH from %s/%s/%s: %v", t.GroupID, t.EdgeNodeID, t.DeviceID, err)
+		}
+	}
 	if a.cfg.OnDeviceBirth != nil {
-		a.cfg.OnDeviceBirth(t.GroupID, t.EdgeNodeID, t.DeviceID, p.Metrics)
+		callback.Run(a.cfg.Logger, "Config.OnDeviceBirth", func() { a.cfg.OnDeviceBirth(t.GroupID, t.EdgeNodeID, t.DeviceID, p.Metrics) })
 	}
 }
 
@@ -851,7 +1047,7 @@ func (a *Application) handleDDEATH(t topic.Topic, data []byte) {
 	a.mu.Unlock()
 
 	if a.cfg.OnDeviceDeath != nil {
-		a.cfg.OnDeviceDeath(t.GroupID, t.EdgeNodeID, t.DeviceID)
+		callback.Run(a.cfg.Logger, "Config.OnDeviceDeath", func() { a.cfg.OnDeviceDeath(t.GroupID, t.EdgeNodeID, t.DeviceID) })
 	}
 }
 
@@ -867,14 +1063,13 @@ func (a *Application) handleNDATA(t topic.Topic, data []byte) {
 	if ns == nil {
 		a.unknownNode(t)
 	}
+	var defs payload.TemplateDefs
 	if ns != nil {
 		if !a.validateSeq(ns, p.GetSeq(), t) {
 			a.mu.Unlock()
 			return
 		}
-		if err := a.templates[nodeKey(t.GroupID, t.EdgeNodeID)].Check(p.Metrics, false); err != nil {
-			a.logWarn("NDATA from %s/%s: %v", t.GroupID, t.EdgeNodeID, err)
-		}
+		defs = a.templates[nodeKey(t.GroupID, t.EdgeNodeID)]
 		for _, m := range p.Metrics {
 			name := resolveMetricName(ns, m)
 			if name != "" {
@@ -884,8 +1079,13 @@ func (a *Application) handleNDATA(t topic.Topic, data []byte) {
 	}
 	a.mu.Unlock()
 
+	if ns != nil {
+		if err := defs.Check(p.Metrics, false); err != nil {
+			a.logWarn("NDATA from %s/%s: %v", t.GroupID, t.EdgeNodeID, err)
+		}
+	}
 	if a.cfg.OnNodeData != nil {
-		a.cfg.OnNodeData(t.GroupID, t.EdgeNodeID, p.Metrics)
+		callback.Run(a.cfg.Logger, "Config.OnNodeData", func() { a.cfg.OnNodeData(t.GroupID, t.EdgeNodeID, p.Metrics) })
 	}
 }
 
@@ -901,14 +1101,13 @@ func (a *Application) handleDDATA(t topic.Topic, data []byte) {
 	if ns == nil {
 		a.unknownNode(t)
 	}
+	var defs payload.TemplateDefs
 	if ns != nil {
 		if !a.validateSeq(ns, p.GetSeq(), t) {
 			a.mu.Unlock()
 			return
 		}
-		if err := a.templates[nodeKey(t.GroupID, t.EdgeNodeID)].Check(p.Metrics, false); err != nil {
-			a.logWarn("DDATA from %s/%s/%s: %v", t.GroupID, t.EdgeNodeID, t.DeviceID, err)
-		}
+		defs = a.templates[nodeKey(t.GroupID, t.EdgeNodeID)]
 		if ds, ok := ns.Devices[t.DeviceID]; ok {
 			for _, m := range p.Metrics {
 				name := resolveDeviceMetricName(ds, m)
@@ -920,8 +1119,13 @@ func (a *Application) handleDDATA(t topic.Topic, data []byte) {
 	}
 	a.mu.Unlock()
 
+	if ns != nil {
+		if err := defs.Check(p.Metrics, false); err != nil {
+			a.logWarn("DDATA from %s/%s/%s: %v", t.GroupID, t.EdgeNodeID, t.DeviceID, err)
+		}
+	}
 	if a.cfg.OnDeviceData != nil {
-		a.cfg.OnDeviceData(t.GroupID, t.EdgeNodeID, t.DeviceID, p.Metrics)
+		callback.Run(a.cfg.Logger, "Config.OnDeviceData", func() { a.cfg.OnDeviceData(t.GroupID, t.EdgeNodeID, t.DeviceID, p.Metrics) })
 	}
 }
 
@@ -1004,6 +1208,15 @@ func (s *EdgeNodeState) clone() *EdgeNodeState {
 	return &c
 }
 
+// cloneSlice returns deep copies of metrics.
+func cloneSlice(metrics []*pb.Payload_Metric) []*pb.Payload_Metric {
+	out := make([]*pb.Payload_Metric, len(metrics))
+	for i, m := range metrics {
+		out[i] = proto.Clone(m).(*pb.Payload_Metric)
+	}
+	return out
+}
+
 func cloneMetrics(in map[string]*pb.Payload_Metric) map[string]*pb.Payload_Metric {
 	out := make(map[string]*pb.Payload_Metric, len(in))
 	for k, m := range in {
@@ -1035,7 +1248,8 @@ func (a *Application) unknownNode(t topic.Topic) {
 }
 
 // askRebirth requests a rebirth from the edge node of t, at most once per
-// rebirthInterval. Called with a.mu held.
+// rebirthInterval, and while fewer than maxRebirthRequests requests are on
+// their way. Called with a.mu held.
 func (a *Application) askRebirth(t topic.Topic, reason string) {
 	key := nodeKey(t.GroupID, t.EdgeNodeID)
 	if a.rebirthAsked == nil {
@@ -1048,14 +1262,30 @@ func (a *Application) askRebirth(t topic.Topic, reason string) {
 		a.rebirthMissed[key] = true
 		return
 	}
+	if a.rebirthsInFlight >= maxRebirthRequests {
+		a.cfg.Logger.Debugf("%s/%s: %s — rebirth not requested: %d requests on their way",
+			t.GroupID, t.EdgeNodeID, reason, a.rebirthsInFlight)
+		return
+	}
 	a.rebirthAsked[key] = time.Now()
+	a.rebirthsInFlight++
 	a.logWarn("%s/%s: %s — requesting rebirth", t.GroupID, t.EdgeNodeID, reason)
 	go func() {
+		defer func() {
+			a.mu.Lock()
+			a.rebirthsInFlight--
+			a.mu.Unlock()
+		}()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = a.RequestRebirth(ctx, t.GroupID, t.EdgeNodeID)
 	}()
 }
+
+// maxRebirthRequests bounds the rebirth requests the application sends at
+// once, over every edge node: a request beyond it is not sent, and the next
+// message out of sequence asks again.
+const maxRebirthRequests = 16
 
 // answeredRebirth is called with a.mu held when an NBIRTH arrives: the
 // pending rebirth request, if any, is answered. A request throttled while it

@@ -92,8 +92,8 @@ var (
 	// Sparkplug 3.0.0 section 6.4.13 (Template) or 6.4.14 (Template.Parameter):
 	// a definition outside the NBIRTH or with a template_ref, an instance
 	// without is_definition or template_ref, a member or parameter the
-	// definition does not have, or an instance in a birth without all members
-	// of its definition.
+	// definition does not have, an instance in a birth without all members
+	// of its definition, or a template nested more than 32 deep.
 	ErrInvalidTemplate = errors.New("sparkplugb: invalid template")
 )
 ```
@@ -128,7 +128,7 @@ func Encode(p *pb.Payload) ([]byte, error)
 func GetDataSetValues(m *pb.Payload_Metric) (columns []string, types []pb.DataType, rows [][]any, err error)
 ```
 
-GetDataSetValues extracts all rows from a DataSet metric as \[]\[]any. A value has the Go type GetValue returns for its column's datatype: integers and DateTime are decoded by the rules of GetValue, and one that is not a value of its column returns ErrTypeMismatch. A cell without a value is nil. A row with more cells than the DataSet has types returns ErrColumnMismatch.
+GetDataSetValues extracts all rows from a DataSet metric as \[]\[]any. A value has the Go type GetValue returns for its column's datatype: integers and DateTime are decoded by the rules of GetValue, and one that is not a value of its column, or a value carried in another field than its column's datatype has, returns ErrTypeMismatch. A cell without a value is nil; a cell with a value in a column whose type is not a basic datatype (Int8 to Text) returns ErrUnknownType. A DataSet whose columns and types differ in count, or whose num\_of\_columns differs from them, and a row with more cells than the DataSet has types, return ErrColumnMismatch. columns is the DataSet's own slice, not a copy; types and rows are new.
 
 ### func GetPropertyValue
 
@@ -136,7 +136,7 @@ GetDataSetValues extracts all rows from a DataSet metric as \[]\[]any. A value h
 func GetPropertyValue(p *pb.Payload_PropertyValue) (any, error)
 ```
 
-GetPropertyValue extracts the Go value from a PropertyValue. It has the Go type GetValue returns for the datatype, and integers and DateTime are decoded by the rules of GetValue: one that is not a value of the datatype returns ErrTypeMismatch. A PropertyValue with is\_null set is nil.
+GetPropertyValue extracts the Go value from a PropertyValue. It has the Go type GetValue returns for the datatype, and integers and DateTime are decoded by the rules of GetValue: one that is not a value of the datatype, or a value carried in another field than the datatype's, returns ErrTypeMismatch. A PropertyValue with is\_null set is nil, one without a value the zero value. A PropertySet or PropertySetList is the PropertyValue's own, not a copy.
 
 ### func GetQuality
 
@@ -144,7 +144,7 @@ GetPropertyValue extracts the Go value from a PropertyValue. It has the Go type 
 func GetQuality(m *pb.Payload_Metric) (int32, bool)
 ```
 
-GetQuality returns the "quality" property of m. The value of a property is Int32 (tck-id-payloads-propertyset-quality-value-type); one that is not returns false.
+GetQuality returns the "quality" property of m. The value of a property is Int32 (tck-id-payloads-propertyset-quality-value-type); one whose type is not Int32, or whose value is not an Int32, returns false.
 
 ### func GetTemplateParameterValue
 
@@ -152,13 +152,17 @@ GetQuality returns the "quality" property of m. The value of a property is Int32
 func GetTemplateParameterValue(p *pb.Payload_Template_Parameter) (any, error)
 ```
 
-GetTemplateParameterValue extracts the Go value from a template parameter. It has the Go type GetValue returns for the datatype: integers and DateTime are decoded by the rules of GetValue, and one that is not a value of the datatype returns ErrTypeMismatch. The members of a template are metrics: GetValue reads them.
+GetTemplateParameterValue extracts the Go value from a template parameter. It has the Go type GetValue returns for the datatype: integers and DateTime are decoded by the rules of GetValue, and one that is not a value of the datatype, or a value carried in another field than the datatype's, returns ErrTypeMismatch. A parameter without a value reads as the zero value. The members of a template are metrics: GetValue reads them.
 
 ### func GetValue
 
 ```go
 func GetValue(m *pb.Payload_Metric) (any, error)
 ```
+
+GetValue returns the value of m as the Go type of its datatype: int8 to int64 and uint8 to uint64 for the integers, time.Time for DateTime, float32, float64, bool, string for String, Text and UUID, \[]byte for Bytes and File, \*pb.Payload\_DataSet, \*pb.Payload\_Template, and a slice of the element type for an array. A metric with is\_null set is nil. A metric without a value reads as the zero value of its type, and an array as one decoded from no bytes.
+
+A value carried in another field than its datatype's, a string in a Float metric for one, returns ErrTypeMismatch, as does an integer out of the datatype's range. The \[]byte of Bytes and File, the DataSet and the Template are the metric's own: they change with it. Arrays are decoded into new slices.
 
 ### func NewAliasMetric
 
@@ -172,7 +176,7 @@ func NewAliasMetric(alias uint64, dt pb.DataType, v any) (*pb.Payload_Metric, er
 func NewDataSet(name string, columns []string, types []pb.DataType, rows [][]any) (*pb.Payload_Metric, error)
 ```
 
-NewDataSet creates a DataSet metric. columns defines the column names, types the DataType for each column, and rows is a \[]\[]any where each inner slice has one value per column.
+NewDataSet creates a DataSet metric. columns defines the column names, types the DataType for each column, and rows is a \[]\[]any where each inner slice has one value per column. The metric keeps columns as it is, not a copy; types and rows are encoded into it.
 
 A value has the Go type GetValue returns for its column's datatype. For an integer column the wire type, uint32 or uint64, is also taken, as long as it is a value of the column's datatype. A value that is not returns ErrTypeMismatch. A column type that is not a basic datatype (Int8 to Text) returns ErrUnknownType.
 
@@ -181,6 +185,8 @@ A value has the Go type GetValue returns for its column's datatype. For an integ
 ```go
 func NewMetric(name string, dt pb.DataType, v any) (*pb.Payload_Metric, error)
 ```
+
+NewMetric returns a metric named name, stamped now, with the value v of datatype dt as SetValue sets it: a \[]byte, DataSet or Template is kept, not copied.
 
 ### func NewMetricWithAlias
 
@@ -200,7 +206,7 @@ func NewPayload(seq uint64, metrics ...*pb.Payload_Metric) *pb.Payload
 func NewPropertyValue(dt pb.DataType, v any) (*pb.Payload_PropertyValue, error)
 ```
 
-NewPropertyValue creates a PropertyValue of the given type. The value has the Go type GetValue returns for the datatype, \*pb.Payload\_PropertySet for a PropertySet and \*pb.Payload\_PropertySetList for a PropertySetList. For an integer the wire type, uint32 or uint64, is also taken, as long as it is a value of the datatype; a value that is not returns ErrTypeMismatch. A nil value sets is\_null.
+NewPropertyValue creates a PropertyValue of the given type. The value has the Go type GetValue returns for the datatype, \*pb.Payload\_PropertySet for a PropertySet and \*pb.Payload\_PropertySetList for a PropertySetList. For an integer the wire type, uint32 or uint64, is also taken, as long as it is a value of the datatype; a value that is not returns ErrTypeMismatch. A nil value sets is\_null. A PropertySet or PropertySetList is kept, not copied.
 
 ### func NewTemplateDefinition
 
@@ -208,7 +214,7 @@ NewPropertyValue creates a PropertyValue of the given type. The value has the Go
 func NewTemplateDefinition(name, version string, metrics []*pb.Payload_Metric, params []*pb.Payload_Template_Parameter) (*pb.Payload_Metric, error)
 ```
 
-NewTemplateDefinition creates a template definition metric. A definition has is\_definition=true, a version, and member metrics.
+NewTemplateDefinition creates a template definition metric. A definition has is\_definition=true, a version, and member metrics. The metric keeps metrics and params, and the members and parameters they point to, as they are: they are not copied.
 
 ### func NewTemplateInstance
 
@@ -216,7 +222,7 @@ NewTemplateDefinition creates a template definition metric. A definition has is\
 func NewTemplateInstance(name, templateRef string, metrics []*pb.Payload_Metric, params []*pb.Payload_Template_Parameter) (*pb.Payload_Metric, error)
 ```
 
-NewTemplateInstance creates a template instance metric. An instance has template\_ref set to the definition name, optional parameter overrides.
+NewTemplateInstance creates a template instance metric. An instance has template\_ref set to the definition name, optional parameter overrides. The metric keeps metrics and params as they are: they are not copied.
 
 ### func NewTemplateParameter
 
@@ -243,6 +249,8 @@ func SetQuality(m *pb.Payload_Metric, quality int32)
 ```go
 func SetValue(m *pb.Payload_Metric, dt pb.DataType, v any) error
 ```
+
+SetValue sets the datatype of m to dt and its value to v, which has the Go type GetValue returns for dt; a nil v sets is\_null. The \[]byte of Bytes and File, the DataSet and the Template are kept, not copied: they become the metric's own, and change with it. Arrays, UInt8Array included, are encoded into new bytes. A v of another Go type, or an integer out of the datatype's range, returns ErrTypeMismatch; a datatype the codec does not know returns ErrUnknownType.
 
 ### func StampMetrics
 

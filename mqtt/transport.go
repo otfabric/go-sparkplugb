@@ -44,4 +44,8 @@ type ConnectOpts struct {
 	OnConnectionLost func(err error)
 }
 
+// MessageHandler is called by a transport with each message received on a
+// subscription. The payload is the handler's: a transport gives each message
+// a slice of its own and does not use or change it after the call. The host
+// and application runtimes keep it while they hold a message back.
 type MessageHandler func(topic string, payload []byte)

@@ -43,6 +43,8 @@ type BdSeqStore interface {
 type CommandHandler func(deviceID string, metrics []*pb.Payload_Metric)
 ```
 
+CommandHandler is called with the metrics of an NCMD (deviceID "") or a DCMD, on the transport's goroutine and without a lock of the node held, so it may call the node; the next message waits until it returns, so it should not block. The metrics are the handler's. A handler that does not return normally is logged with its stack, and the node goes on.
+
 ### type Config
 
 ```go
@@ -100,11 +102,15 @@ Metrics receives the events of an edge node, to count and time them: set it as C
 ```go
 type Node struct {
 
+	// Close was called: Connect refuses, and one in progress ends with ErrClosed
+
 	// device IDs in the order of their first DBIRTH
 	// alias -> metric name
 	// alias -> device ID, "" for the node
 
 	// connection generation; prevents stale callbacks
+
+	// state transitions not yet delivered (notify)
 
 	// Birth state for auto-rebirth
 
@@ -149,6 +155,8 @@ func (n *Node) BdSeq() uint64
 func (n *Node) Close(ctx context.Context) error
 ```
 
+Close disconnects the node, as Disconnect does, and closes it: Connect then returns ErrClosed, and a Connect in progress, a walk to another server included, ends with ErrClosed and leaves no connection up. Close is safe to call more than once and from several goroutines: the first call closes the node, the others return nil at once.
+
 #### func (Node) Connect
 
 ```go
@@ -167,11 +175,15 @@ func (n *Node) Disconnect(ctx context.Context) error
 func (n *Node) PublishBirth(ctx context.Context, nodeMetrics []*pb.Payload_Metric) error
 ```
 
+PublishBirth publishes the NBIRTH of a new session with nodeMetrics, after bdSeq and "Node Control/Rebirth". It sets the timestamp of a metric that has none. The node keeps copies of the metrics for Rebirth: a change the caller makes to its metrics afterwards is not published by a rebirth until it is sent as data, and the caller may go on using its metrics.
+
 #### func (Node) PublishDeviceBirth
 
 ```go
 func (n *Node) PublishDeviceBirth(ctx context.Context, deviceID string, metrics []*pb.Payload_Metric) error
 ```
+
+PublishDeviceBirth publishes the DBIRTH of a device. It sets the timestamp of a metric that has none, and keeps copies of the metrics for Rebirth, as PublishBirth does.
 
 #### func (Node) PublishDeviceData
 
@@ -279,3 +291,7 @@ func (s State) String() string
 ```go
 type StateHandler func(old, new State)
 ```
+
+StateHandler is called with each transition of the node's state, in the order of the transitions and one call at a time, after the node has released its locks: on the goroutine that made the transition (the caller of Connect, Disconnect or Close, the transport's for a lost connection or the primary host's STATE, or the node's own while it walks to another server), or on one that was delivering an earlier transition when it was made. It may call the node: PublishBirth when the state becomes Online, Close, or Connect after Disconnected. A transition such a call makes is delivered after the handler returns. Disconnected after Disconnect, or after a Connect that failed, is delivered once the node has ended the connection, so a Connect from the handler is not ended with it. A handler that does not return normally is logged with its stack, and the node goes on.
+
+The node does not publish an NBIRTH by itself: every session needs one, after Connect and after each walk to another server, so publish it when the state becomes Online.

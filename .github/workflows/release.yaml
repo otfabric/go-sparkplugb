@@ -26,4 +26,9 @@ jobs:
       release-name-prefix: go-sparkplugb
       test-exclude-regex: "(/example(s)?($|/)|/proto($|/))"
       update-major-tag: false
+      # The modules that require go-sparkplugb, built and tested against the
+      # candidate before it is tagged.
+      consumers: |
+        otfabric/sparkplugbctl
+        otfabric/sparkplugb-interop:own/go-sparkplugb
     secrets: inherit

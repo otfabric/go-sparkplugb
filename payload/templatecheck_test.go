@@ -276,19 +276,37 @@ func TestTemplateDefsNested(t *testing.T) {
 	}
 }
 
+// FuzzTemplateDefs runs the template checks on a decoded payload, as the
+// definitions of a birth and as the instances of a birth and of data: every
+// error is ErrInvalidTemplate or ErrUnknownTemplate.
 func FuzzTemplateDefs(f *testing.F) {
 	rpm, _ := NewMetric("rpm", pb.DataType_Double, 0.0)
 	def, _ := NewTemplateDefinition("Motor", "1", []*pb.Payload_Metric{rpm}, nil)
 	inst, _ := NewTemplateInstance("M1", "Motor", []*pb.Payload_Metric{rpm}, nil)
 	b, _ := Encode(NewPayload(0, def, inst))
 	f.Add(b)
+	for _, ms := range [][]*pb.Payload_Metric{
+		{nestedDefinition(3, "d")},
+		{recursiveDefinition(), nestedInstance(3)},
+		{nestedDefinition(maxTemplateDepth+1, "d")},
+		{nestedInstance(2)},
+	} {
+		b, _ := Encode(NewPayload(0, ms...))
+		f.Add(b)
+	}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		p, err := Decode(data)
 		if err != nil {
 			return
 		}
-		defs, _ := NewTemplateDefs(p.GetMetrics())
-		_ = defs.Check(p.GetMetrics(), true)
-		_ = defs.Check(p.GetMetrics(), false)
+		check := func(what string, err error) {
+			if err != nil && !errors.Is(err, ErrInvalidTemplate) && !errors.Is(err, ErrUnknownTemplate) {
+				t.Fatalf("%s: %v, want ErrInvalidTemplate or ErrUnknownTemplate", what, err)
+			}
+		}
+		defs, err := NewTemplateDefs(p.GetMetrics())
+		check("NewTemplateDefs", err)
+		check("Check in a birth", defs.Check(p.GetMetrics(), true))
+		check("Check in data", defs.Check(p.GetMetrics(), false))
 	})
 }
