@@ -91,7 +91,7 @@ or `uint64`: it is checked by the table above and written in the form above.
 
 ## Verification status
 
-Besides its own tests, the library is run on every push against six
+Besides its own tests, the library is run on every pull request against six
 independent implementations, in every role they have, on four MQTT brokers.
 The reference builds are the images of
 [otfabric/sparkplugb-interop v0.4.0](https://github.com/otfabric/sparkplugb-interop/releases/tag/v0.4.0),

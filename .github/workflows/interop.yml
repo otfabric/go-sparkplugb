@@ -1,3 +1,5 @@
+# Called by pr.yml on every pull request that is not documentation only;
+# dispatch it to run it on a branch without a pull request.
 name: Interop
 run-name: "Interop (${{ github.event_name }}) on ${{ github.ref_name }} by @${{ github.actor }}"
 
@@ -10,14 +12,14 @@ run-name: "Interop (${{ github.event_name }}) on ${{ github.ref_name }} by @${{ 
 # is cloned or built here.
 
 on:
-  push:
-    branches: ["**"]
-    paths-ignore: ["**/*.md"]
-  pull_request:
-    branches: ["**"]
-    paths-ignore: ["**/*.md"]
   schedule:
     - cron: "23 4 * * *"
+  workflow_call:
+    inputs:
+      adapters:
+        description: "Comma-separated subset of the references (default: all)"
+        type: string
+        default: ""
   workflow_dispatch:
     inputs:
       adapters:

@@ -104,7 +104,7 @@ with the raw protobuf types.
 
 ## Compatibility matrix
 
-Every role of go-sparkplugb runs on every push against the six reference
+Every role of go-sparkplugb runs on every pull request against the six reference
 stacks of
 [sparkplugb-interop v0.4.0](https://github.com/otfabric/sparkplugb-interop/releases/tag/v0.4.0),
 on four MQTT brokers, with the images pinned by digest in
