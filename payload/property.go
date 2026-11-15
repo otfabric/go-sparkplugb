@@ -80,9 +80,10 @@ func NewPropertyValue(dt pb.DataType, v any) (*pb.Payload_PropertyValue, error) 
 // GetPropertyValue extracts the Go value from a PropertyValue. It has the Go
 // type GetValue returns for the datatype, and integers and DateTime are decoded
 // by the rules of GetValue: one that is not a value of the datatype, or a value
-// carried in another field than the datatype's, returns ErrTypeMismatch. A
-// PropertyValue with is_null set is nil, one without a value the zero value. A
-// PropertySet or PropertySetList is the PropertyValue's own, not a copy.
+// carried in another field than the datatype's, returns ErrTypeMismatch, and a
+// string above MaxStringBytes ErrStringTooLarge. A PropertyValue with is_null
+// set is nil, one without a value the zero value. A PropertySet or
+// PropertySetList is the PropertyValue's own, not a copy.
 func GetPropertyValue(p *pb.Payload_PropertyValue) (any, error) {
 	if p == nil {
 		return nil, ErrNilMetric
@@ -123,6 +124,9 @@ func GetPropertyValue(p *pb.Payload_PropertyValue) (any, error) {
 		case nil:
 			return "", nil
 		case *pb.Payload_PropertyValue_StringValue:
+			if len(v.StringValue) > MaxStringBytes {
+				return nil, ErrStringTooLarge
+			}
 			return v.StringValue, nil
 		}
 	case pb.DataType_PropertySet:

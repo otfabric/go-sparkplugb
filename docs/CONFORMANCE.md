@@ -105,7 +105,7 @@ applicable (broker or server requirement).
 | Track online/offline state of all Edge Nodes | tck-id-host-topic-phid-state-tracking | Y | |
 | Validate seq ordering per Edge Node | tck-id-host-topic-phid-seq-validation | Y | |
 | On seq gap: request rebirth via NCMD | tck-id-host-topic-phid-seq-rebirth | Y | At most one pending request per node (2 s) |
-| Mark metrics STALE on NDEATH/DDEATH | tck-id-host-topic-phid-stale-metrics | Y | Stale flag on EdgeNodeState/DeviceState |
+| Mark metrics STALE on NDEATH/DDEATH | tck-id-host-topic-phid-stale-metrics | Y | Stale flag on EdgeNodeState/DeviceState; a DBIRTH applied after the node's NDEATH leaves the device stale, without a status change |
 | Message reordering timeout (optional) | tck-id-host-topic-phid-reorder | Y | ReorderTimeout config, timer-based |
 
 ### Primary Host Behavior
@@ -113,7 +113,7 @@ applicable (broker or server requirement).
 | Requirement | TCK ID | Status | Notes |
 |------------|--------|--------|-------|
 | Edge waits for Primary Host STATE online=true | tck-id-message-flow-edge-node-birth-primary-host | Y | |
-| Edge walks server list if STATE online=false | tck-id-message-flow-edge-node-birth-primary-host-walk | Y | walkServers() cycles ServerURLs |
+| Edge walks server list if STATE online=false | tck-id-message-flow-edge-node-birth-primary-host-walk | Y | walkServers() cycles ServerURLs; an offline STATE older than the last online STATE received is ignored |
 | Edge disconnects if Primary Host goes offline | tck-id-message-flow-edge-node-birth-primary-host-offline | Y | |
 
 ---
@@ -182,7 +182,7 @@ delivered. Both use `payload.NewTemplateDefs` and `TemplateDefs.Check`
 | An instance has is_definition=false | tck-id-payloads-template-instance-is-definition, tck-id-payloads-template-is-definition-instance | Y | `NewTemplateInstance` sets it |
 | is_definition in every template | tck-id-payloads-template-is-definition | Y | Edge and host: a template without it is an invalid instance |
 | An instance's template_ref names the definition's metric | tck-id-payloads-template-instance-ref, tck-id-payloads-template-ref-instance | Y | Edge and host: missing, empty, not UTF-8, or no such definition |
-| An instance has only members of its definition | tck-id-payloads-template-instance-members | Y | Edge and host, by member name; a member by alias only is not checked |
+| An instance has only members of its definition | tck-id-payloads-template-instance-members | Y | Edge and host, by member name; a member by alias only is not checked. Sparkplug gives member names no uniqueness rule: a definition that names a member more than once is accepted |
 | An instance in an NBIRTH or DBIRTH has all members of its definition | tck-id-payloads-template-instance-members-birth | Y | Edge and host. A rebirth after data with some members keeps the others (`withCurrent`) |
 | An instance in NDATA or DDATA may have a subset | tck-id-payloads-template-instance-members-data | Y | |
 | An instance may have parameters of its definition | tck-id-payloads-template-instance-parameters | Y | A parameter the definition lacks is refused |

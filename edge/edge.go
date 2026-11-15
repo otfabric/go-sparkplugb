@@ -26,6 +26,9 @@ var (
 	// ErrDuplicateID is returned by PublishBirth and PublishDeviceBirth when an
 	// alias is used twice in one birth or by another part of the edge node.
 	ErrDuplicateID = errors.New("sparkplugb: duplicate device or alias ID")
+	// ErrAlreadyConnected is returned by Connect when the node is connecting
+	// or connected: a node has one connection at a time. Disconnect it first.
+	ErrAlreadyConnected = errors.New("sparkplugb: already connected")
 	// ErrInvalidState is not returned by this package.
 	//
 	// Deprecated: operations in the wrong state return ErrNotConnected, ErrNoBirth
@@ -80,6 +83,12 @@ type StateHandler func(old, new State)
 // so it may call the node; the next message waits until it returns, so it
 // should not block. The metrics are the handler's. A handler that does not
 // return normally is logged with its stack, and the node goes on.
+//
+// An NCMD that sets "Node Control/Rebirth" to true, by name or by the alias
+// the node's birth gave it, starts a rebirth (see Rebirth); its other
+// metrics, if any, go to OnNodeCmd without that one. A DCMD is passed on with
+// the device ID of its topic as it is, whether or not the node published a
+// DBIRTH for that device: the handler checks the ID.
 type CommandHandler func(deviceID string, metrics []*pb.Payload_Metric)
 
 type Config struct {
@@ -107,6 +116,11 @@ type Config struct {
 	BdSeqStore BdSeqStore
 }
 
+// BdSeqStore keeps the bdSeq of the node between runs. Connect calls it
+// with the node's lock held, so it must not call the node. A Load or Store
+// that panics fails Connect; one that ends its goroutine with runtime.Goexit
+// (testing.T.FailNow, for example) ends the Connect with it, and leaves the
+// node Disconnected.
 type BdSeqStore interface {
 	Load() (uint64, error)
 	Store(bdSeq uint64) error
@@ -159,8 +173,8 @@ type Node struct {
 	serverIdx int
 	walking   bool
 
-	// hostOnlineTS is the timestamp of the latest online STATE of the
-	// primary host: an offline STATE older than it is ignored.
+	// hostOnlineTS is the timestamp of the last online STATE of the primary
+	// host received: an offline STATE older than it is ignored.
 	hostOnlineTS int64
 
 	// seqMu keeps the messages of a session in sequence on the wire: it is
@@ -231,17 +245,25 @@ func New(transport mqtt.Transport, cfg Config) (*Node, error) {
 	}, nil
 }
 
+// Connect connects the node to its broker, or to the current server of
+// ServerURLs. It returns ErrAlreadyConnected, and leaves the connection
+// as it is, while the node is connecting or connected: a node has one
+// connection at a time.
 func (n *Node) Connect(ctx context.Context) error {
 	n.mu.Lock()
 	if n.closed {
 		n.mu.Unlock()
 		return ErrClosed
 	}
+	if n.state != Disconnected {
+		n.mu.Unlock()
+		return ErrAlreadyConnected
+	}
 	n.setState(Connecting)
 
 	var bdSeq uint64
 	var err error
-	fail := callback.Try("BdSeqStore.Load", func() { bdSeq, err = n.cfg.BdSeqStore.Load() })
+	fail := n.tryStore("BdSeqStore.Load", func() { bdSeq, err = n.cfg.BdSeqStore.Load() })
 	if fail != nil {
 		err = fail
 	}
@@ -254,7 +276,7 @@ func (n *Node) Connect(ctx context.Context) error {
 	}
 	n.bdSeq = (bdSeq + 1) % 256
 
-	fail = callback.Try("BdSeqStore.Store", func() { err = n.cfg.BdSeqStore.Store(n.bdSeq) })
+	fail = n.tryStore("BdSeqStore.Store", func() { err = n.cfg.BdSeqStore.Store(n.bdSeq) })
 	if fail != nil {
 		err = fail
 	}
@@ -355,6 +377,23 @@ func (n *Node) Connect(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// tryStore calls the BdSeqStore as callback.Try does, with n.mu held. A
+// store that ends the goroutine with runtime.Goexit, which Try cannot stop,
+// leaves the node Disconnected and its lock free on the way out.
+func (n *Node) tryStore(name string, f func()) *callback.Failure {
+	returned := false
+	defer func() {
+		if !returned {
+			n.setState(Disconnected)
+			n.mu.Unlock()
+			n.notify()
+		}
+	}()
+	fail := callback.Try(name, f)
+	returned = true
+	return fail
 }
 
 // advance moves a Connect in progress to state s, and reports true, unless
@@ -636,6 +675,12 @@ func (n *Node) publishDeviceDeath(ctx context.Context, deviceID string) error {
 // for it, and follow the births with the seq of the new session. The NBIRTH
 // is stamped in a later millisecond than the message before it, unless the
 // clock went back.
+//
+// Rebirth repeats the births of the current connection only: it returns
+// ErrNoBirth, and publishes nothing, until the program has published the
+// NBIRTH of the connection with PublishBirth, and a device is online when
+// its DBIRTH was published on this connection and no DDEATH since. A
+// rebirth that an NCMD asks for before the program's NBIRTH is not made.
 func (n *Node) Rebirth(ctx context.Context) error {
 	n.seqMu.Lock()
 	defer n.seqMu.Unlock()
@@ -643,6 +688,10 @@ func (n *Node) Rebirth(ctx context.Context) error {
 	if n.state != Online {
 		n.mu.Unlock()
 		return ErrNotConnected
+	}
+	if !n.born {
+		n.mu.Unlock()
+		return ErrNoBirth
 	}
 	birthMetrics := n.birthMetrics
 	type birth struct {
@@ -685,8 +734,7 @@ func (n *Node) Disconnect(ctx context.Context) error {
 			ndeath = b
 		}
 	}
-	n.born = false
-	n.birthMetrics = nil
+	n.endSession()
 	n.setState(Disconnected)
 	n.mu.Unlock()
 	n.pubMu.Unlock()
@@ -761,10 +809,22 @@ func (n *Node) makeConnLostHandler(connGen uint64) func(error) {
 			return
 		}
 		n.cfg.Logger.Warnf("transport lost: %v", err)
-		n.born = false
+		n.endSession()
 		n.setState(Disconnected)
 		n.mu.Unlock()
 		n.notify()
+	}
+}
+
+// endSession forgets the births of the session that ended with the
+// connection, by Disconnect or by its loss alike: the next connection needs
+// the program's NBIRTH and DBIRTHs before Rebirth repeats them. Called with
+// n.mu held.
+func (n *Node) endSession() {
+	n.born = false
+	n.birthMetrics = nil
+	for _, dev := range n.devices {
+		dev.Online = false
 	}
 }
 
@@ -809,6 +869,7 @@ func (n *Node) publish(ctx context.Context, mt topic.MessageType, deviceID strin
 
 	b, err := payload.Encode(p)
 	if err != nil {
+		n.unpublished(mt, p)
 		return fmt.Errorf("sparkplugb: encode %s: %w", mt, err)
 	}
 
@@ -818,10 +879,32 @@ func (n *Node) publish(ctx context.Context, mt topic.MessageType, deviceID strin
 	online := n.state == Online
 	n.mu.Unlock()
 	if !online {
+		n.unpublished(mt, p)
 		return ErrNotConnected
 	}
+	if err := ctx.Err(); err != nil {
+		n.unpublished(mt, p)
+		return fmt.Errorf("sparkplugb: publish %s: %w", mt, err)
+	}
 	n.lastTS = p.GetTimestamp() // under seqMu, as every caller holds it
+	// An error of the transport does not tell whether the message went out:
+	// its seq stays taken, and a host that missed it asks for a rebirth.
 	return n.transport.Publish(ctx, t, 0, false, b)
+}
+
+// unpublished gives back the seq of p, a message after the NBIRTH that was
+// not handed to the transport, so that the next message takes it and the
+// session has no gap. Called with seqMu held, as by every caller of publish:
+// no other message took a seq since.
+func (n *Node) unpublished(mt topic.MessageType, p *pb.Payload) {
+	if mt == topic.NBIRTH || p.Seq == nil {
+		return
+	}
+	n.mu.Lock()
+	if n.seq == p.GetSeq() {
+		n.seq = (n.seq + 255) % 256
+	}
+	n.mu.Unlock()
 }
 
 func (n *Node) makeHandler(connGen uint64) mqtt.MessageHandler {
@@ -961,30 +1044,68 @@ func hasMetric(metrics []*pb.Payload_Metric, name string) bool {
 }
 
 func (n *Node) handleNCMD(p *pb.Payload) {
+	rebirth := false
+	metrics := make([]*pb.Payload_Metric, 0, len(p.Metrics))
+	n.mu.Lock()
 	for _, m := range p.Metrics {
-		if m.GetName() == rebirthMetricName && m.GetBooleanValue() {
-			n.cfg.Logger.Infof("rebirth requested")
-			n.rebirthMu.Lock()
-			if !n.rebirthPending {
-				n.rebirthPending = true
-				go func() {
-					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-					defer cancel()
-					if err := n.Rebirth(ctx); err != nil {
-						n.cfg.Logger.Errorf("auto-rebirth failed: %v", err)
-					}
-					n.rebirthMu.Lock()
-					n.rebirthPending = false
-					n.rebirthMu.Unlock()
-				}()
-			}
-			n.rebirthMu.Unlock()
+		if m.GetBooleanValue() && n.isRebirthMetric(m) {
+			rebirth = true
+			continue
+		}
+		metrics = append(metrics, m)
+	}
+	n.mu.Unlock()
+
+	if rebirth {
+		n.cfg.Logger.Infof("rebirth requested")
+		n.startRebirth()
+		if len(metrics) == 0 {
 			return
 		}
 	}
 	if n.cfg.OnNodeCmd != nil {
-		callback.Run(n.cfg.Logger, "Config.OnNodeCmd", func() { n.cfg.OnNodeCmd("", p.Metrics) })
+		callback.Run(n.cfg.Logger, "Config.OnNodeCmd", func() { n.cfg.OnNodeCmd("", metrics) })
 	}
+}
+
+// isRebirthMetric reports whether m is "Node Control/Rebirth": by name, or,
+// without a name, by the alias that the node's NBIRTH gave it. Called with
+// n.mu held.
+func (n *Node) isRebirthMetric(m *pb.Payload_Metric) bool {
+	if m.Name != nil {
+		return m.GetName() == rebirthMetricName
+	}
+	if m.Alias == nil {
+		return false
+	}
+	owner, ok := n.owners[m.GetAlias()]
+	return ok && owner == "" && n.aliases[m.GetAlias()] == rebirthMetricName
+}
+
+// startRebirth runs Rebirth on a goroutine of its own, unless one is
+// pending: requests that arrive meanwhile are served by it.
+func (n *Node) startRebirth() {
+	n.rebirthMu.Lock()
+	defer n.rebirthMu.Unlock()
+	if n.rebirthPending {
+		return
+	}
+	n.rebirthPending = true
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		switch err := n.Rebirth(ctx); {
+		case errors.Is(err, ErrNoBirth):
+			// The program's NBIRTH of this connection is still to come, and
+			// it is the birth the request asks for.
+			n.cfg.Logger.Infof("rebirth requested before the birth of the session: not made")
+		case err != nil:
+			n.cfg.Logger.Errorf("auto-rebirth failed: %v", err)
+		}
+		n.rebirthMu.Lock()
+		n.rebirthPending = false
+		n.rebirthMu.Unlock()
+	}()
 }
 
 type statePayload struct {
@@ -1003,7 +1124,11 @@ func (n *Node) handleState(topicStr string, data []byte) {
 	walk := false
 	switch {
 	case sp.Online:
-		n.hostOnlineTS = max(n.hostOnlineTS, sp.Timestamp)
+		// The last online STATE received counts, not the highest timestamp
+		// seen: the broker delivers the STATEs of the host in the order the
+		// host published them, so a later online STATE with an earlier
+		// timestamp (a clock set back) replaces one stamped ahead.
+		n.hostOnlineTS = sp.Timestamp
 		if n.state == WaitingForPrimaryHost {
 			n.setState(Online)
 		}
@@ -1044,7 +1169,9 @@ func (n *Node) walkServers() {
 
 	for attempt := 0; ; attempt++ {
 		n.mu.Lock()
-		if n.closed {
+		// Closed, or connected again by the StateHandler on Disconnected:
+		// the node has one connection at a time, and the walk ends.
+		if n.closed || n.state != Disconnected {
 			n.mu.Unlock()
 			return
 		}
@@ -1060,6 +1187,9 @@ func (n *Node) walkServers() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		err := n.Connect(ctx)
 		cancel()
+		if errors.Is(err, ErrAlreadyConnected) {
+			return // the StateHandler connected meanwhile
+		}
 		callback.Run(n.cfg.Logger, "Metrics.OnConnect", func() { n.cfg.Metrics.OnConnect(url, time.Since(start), err) })
 		if err == nil || errors.Is(err, ErrClosed) {
 			return

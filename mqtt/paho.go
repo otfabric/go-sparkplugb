@@ -62,9 +62,10 @@ func NewPahoTransport() *PahoTransport {
 	}
 }
 
-// Connect opens a connection to opts.BrokerURL, in place of the current one,
-// and returns once the broker accepted it, ctx ended or ConnectTimeout
-// passed. An attempt that ends with ctx or the timeout is aborted: it does
+// Connect opens a connection to opts.BrokerURL in place of the current one,
+// which it ends first as Disconnect does but without calling the
+// OnConnectionLost of that connection, and returns once the broker accepted
+// it, ctx ended or ConnectTimeout passed. An attempt that ends with ctx or the timeout is aborted: it does
 // not connect later. A Disconnect meanwhile aborts it too, and Connect
 // returns an error wrapping ErrConnectionLost. Connect does not hold the
 // transport's lock while it waits, so Disconnect, Publish and Subscribe
@@ -126,6 +127,16 @@ func (t *PahoTransport) Connect(ctx context.Context, opts ConnectOpts) error {
 	})
 
 	client := paho.NewClient(pahoOpts)
+	t.mu.Lock()
+	prev := t.client
+	t.mu.Unlock()
+	// One connection at a time: the current one ends before the next is
+	// opened, with a DISCONNECT, so that the broker discards its will. Its
+	// OnConnectionLost is not called: the caller replaced it.
+	if prev != nil {
+		t.release(prev)
+		end(prev)
+	}
 	t.mu.Lock()
 	t.opts = pahoOpts
 	t.client = client

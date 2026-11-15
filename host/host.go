@@ -3,10 +3,14 @@
 package host
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -148,11 +152,12 @@ type App struct {
 	sessionWait   time.Duration                   // sessionWait, shorter in tests
 	lateBirthWait time.Duration                   // lateBirthWait, shorter in tests
 
-	heldCount        int       // messages in held, over every node
-	heldBytes        int       // their payload bytes
-	heldDropped      uint64    // held messages dropped for maxHeldTotal and maxHeldBytes
-	lastSweep        time.Time // when sweep last ran
-	rebirthsInFlight int       // rebirth requests being sent (askRebirth)
+	heldCount        int         // messages in held, over every node
+	heldBytes        int         // their payload bytes
+	heldDropped      uint64      // held messages dropped for maxHeldTotal and maxHeldBytes
+	lastSweep        time.Time   // when sweep last ran
+	sweepTimer       *time.Timer // pending sweep of the held messages (armSweep)
+	rebirthsInFlight int         // rebirth requests being sent (askRebirth)
 
 	// stateMu keeps the STATE messages of a connection in order: Connect
 	// holds it from its last check for Close to the STATE birth, Disconnect
@@ -362,6 +367,10 @@ func (a *App) Close(ctx context.Context) error {
 		return nil
 	}
 	a.closed = true
+	if a.sweepTimer != nil {
+		a.sweepTimer.Stop()
+		a.sweepTimer = nil
+	}
 	a.mu.Unlock()
 
 	err := a.Disconnect(ctx)
@@ -523,6 +532,7 @@ func (a *App) handleMessage(topicStr string, data []byte) {
 	if err != nil {
 		return
 	}
+	callback.Run(a.cfg.Logger, "Metrics.OnMessage", func() { a.cfg.Metrics.OnMessage(t.Type.String()) })
 
 	switch t.Type {
 	case topic.STATE:
@@ -582,8 +592,8 @@ type session struct {
 const maxApplied = 32
 
 func (s *session) remember(m heldMsg) {
-	if s == nil {
-		return
+	if s == nil || len(m.data) > maxHeldBytes {
+		return // a message that could not be held again is not kept for it
 	}
 	if len(s.applied) == maxApplied {
 		s.applied = append(s.applied[:0], s.applied[1:]...)
@@ -643,16 +653,16 @@ func (a *App) holdLocked(t topic.Topic, data []byte, seq, ts uint64, checks spar
 		expected := (ns.LastSeq + 1) % 256
 		if seq == expected {
 			if checks&sparkplugb.CheckOlderInSequence != 0 && isData(t.Type) && a.superseded(key, ts) {
-				a.cfg.Logger.Debugf("%s/%s: dropped %s, seq %d: in sequence, published before the NBIRTH (CheckOlderInSequence)",
-					t.GroupID, t.EdgeNodeID, t.Type, seq)
+				a.cfg.Logger.Debugf("%s: dropped %s, seq %d: in sequence, published before the NBIRTH (CheckOlderInSequence)",
+					logNode(t), t.Type, seq)
 				return true, true
 			}
 			a.sessions[key].remember(heldMsg{t: t, seq: seq, data: data, ts: ts})
 			return false, false
 		}
 		if a.superseded(key, ts) {
-			a.cfg.Logger.Debugf("%s/%s: dropped %s, seq %d: published before the NBIRTH",
-				t.GroupID, t.EdgeNodeID, t.Type, seq)
+			a.cfg.Logger.Debugf("%s: dropped %s, seq %d: published before the NBIRTH",
+				logNode(t), t.Type, seq)
 			return true, true
 		}
 		behind = (seq-expected+256)%256 > 128
@@ -660,9 +670,7 @@ func (a *App) holdLocked(t topic.Topic, data []byte, seq, ts uint64, checks spar
 	if len(a.held[key]) >= maxHeld || len(data) > maxHeldBytes {
 		return false, false
 	}
-	for a.heldCount >= maxHeldTotal || a.heldBytes+len(data) > maxHeldBytes {
-		a.dropOldestHeld()
-	}
+	a.trimHeld(1, len(data))
 	a.setHeld(key, append(a.held[key], heldMsg{t: t, seq: seq, data: data, ts: ts, at: now, nextSession: behind}))
 	switch {
 	case behind:
@@ -730,6 +738,7 @@ func (a *App) setHeld(key string, msgs []heldMsg) {
 		a.held = make(map[string][]heldMsg)
 	}
 	a.held[key] = msgs
+	a.armSweep()
 }
 
 func heldSize(msgs []heldMsg) int {
@@ -740,26 +749,116 @@ func heldSize(msgs []heldMsg) int {
 	return n
 }
 
-// dropOldestHeld drops the held message that arrived first, of any edge
-// node. Called with a.mu held and at least one message held.
-func (a *App) dropOldestHeld() {
-	var oldestKey string
-	oldest := -1
-	var at time.Time
+// trimHeld drops the held messages that arrived first, of any edge node,
+// until n more messages of size payload bytes in all fit maxHeldTotal and
+// maxHeldBytes. It sorts the held messages once, however many it drops.
+// Called with a.mu held, size at most maxHeldBytes.
+func (a *App) trimHeld(n, size int) {
+	fits := func(count, bytes int) bool { return count+n <= maxHeldTotal && bytes+size <= maxHeldBytes }
+	if fits(a.heldCount, a.heldBytes) {
+		return
+	}
+	type ref struct {
+		key string
+		i   int
+		at  time.Time
+	}
+	refs := make([]ref, 0, a.heldCount)
 	for key, msgs := range a.held {
 		for i := range msgs {
-			if oldest < 0 || msgs[i].at.Before(at) {
-				oldestKey, oldest, at = key, i, msgs[i].at
+			refs = append(refs, ref{key, i, msgs[i].at})
+		}
+	}
+	slices.SortFunc(refs, func(x, y ref) int {
+		if c := x.at.Compare(y.at); c != 0 {
+			return c
+		}
+		if c := strings.Compare(x.key, y.key); c != 0 {
+			return c
+		}
+		return cmp.Compare(x.i, y.i)
+	})
+	drop := make(map[string]map[int]bool)
+	count, bytes := a.heldCount, a.heldBytes
+	for _, r := range refs {
+		if fits(count, bytes) {
+			break
+		}
+		m := a.held[r.key][r.i]
+		count, bytes = count-1, bytes-len(m.data)
+		if drop[r.key] == nil {
+			drop[r.key] = make(map[int]bool)
+		}
+		drop[r.key][r.i] = true
+		a.heldDropped++
+		a.cfg.Logger.Debugf("%q: dropped a held %s, seq %d: %d messages, %d bytes held",
+			r.key, m.t.Type, m.seq, count, bytes)
+	}
+	for key, idx := range drop {
+		msgs := a.held[key]
+		kept := make([]heldMsg, 0, len(msgs)-len(idx))
+		for i := range msgs {
+			if !idx[i] {
+				kept = append(kept, msgs[i])
+			}
+		}
+		a.setHeld(key, kept)
+	}
+}
+
+// rehold holds msgs, applied to the session that an NBIRTH of key just
+// ended, again for the new session, ahead of the messages held for it, within
+// the bounds of every held message: those that would pass maxHeld or
+// maxHeldBytes by themselves are left out, and the oldest held messages make
+// room for the others. Called with a.mu held.
+func (a *App) rehold(key string, msgs []heldMsg) {
+	room := maxHeld - len(a.held[key])
+	var ours []heldMsg
+	size := 0
+	for _, m := range msgs {
+		if len(ours) >= room {
+			break
+		}
+		if size+len(m.data) > maxHeldBytes {
+			continue
+		}
+		ours = append(ours, m)
+		size += len(m.data)
+	}
+	if len(ours) == 0 {
+		return
+	}
+	a.trimHeld(len(ours), size)
+	a.setHeld(key, append(ours, a.held[key]...)) // on a tie, drain takes the held one
+}
+
+// armSweep makes sure a sweep follows when the oldest held message has
+// waited heldMaxAge, also when no message comes to run it: a held message
+// stays at most heldMaxAge and sweepInterval. Called with a.mu held.
+func (a *App) armSweep() {
+	if a.sweepTimer != nil || a.heldCount == 0 || a.closed {
+		return
+	}
+	oldest := time.Now()
+	for _, msgs := range a.held {
+		for i := range msgs {
+			if msgs[i].at.Before(oldest) {
+				oldest = msgs[i].at
 			}
 		}
 	}
-	msgs := a.held[oldestKey]
-	kept := make([]heldMsg, 0, len(msgs)-1)
-	kept = append(append(kept, msgs[:oldest]...), msgs[oldest+1:]...)
-	a.setHeld(oldestKey, kept)
-	a.heldDropped++
-	a.cfg.Logger.Debugf("%s: dropped a held %s, seq %d: %d messages, %d bytes held",
-		oldestKey, msgs[oldest].t.Type, msgs[oldest].seq, a.heldCount, a.heldBytes)
+	wait := max(time.Until(oldest.Add(heldMaxAge+time.Millisecond)), sweepInterval)
+	a.sweepTimer = time.AfterFunc(wait, a.sweepHeld)
+}
+
+// sweepHeld is the sweep armSweep schedules.
+func (a *App) sweepHeld() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.lastSweep = time.Time{}
+	a.sweep(time.Now()) // with sweepTimer set, setHeld does not arm another
+	a.sweepTimer = nil
+	a.armSweep()
 }
 
 // sweepInterval is how often sweep runs, at most.
@@ -964,7 +1063,7 @@ func setOffline(ns *EdgeNodeState) {
 func (a *App) handleNBIRTH(t topic.Topic, data []byte) {
 	p, err := payload.Decode(data)
 	if err != nil {
-		a.logWarn("decode NBIRTH from %s/%s: %v", t.GroupID, t.EdgeNodeID, err)
+		a.logWarn("decode NBIRTH from %s: %v", logNode(t), err)
 		return
 	}
 	// The host keeps copies: the metrics of p are OnNodeBirth's.
@@ -973,7 +1072,7 @@ func (a *App) handleNBIRTH(t topic.Topic, data []byte) {
 	// applied: the invalid definitions are left out of templates.
 	templates, err := payload.NewTemplateDefs(stored)
 	if err != nil {
-		a.logWarn("NBIRTH from %s/%s: %v", t.GroupID, t.EdgeNodeID, err)
+		a.logWarn("NBIRTH from %s: %v", logNode(t), err)
 	}
 
 	birthMs := a.sessionChecks(t)&sparkplugb.CheckBirthMillisecond != 0
@@ -981,7 +1080,7 @@ func (a *App) handleNBIRTH(t topic.Topic, data []byte) {
 	a.mu.Lock()
 	if late, died := a.lateBirth(t, p); late {
 		a.mu.Unlock()
-		a.cfg.Logger.Debugf("%s/%s: dropped NBIRTH: its session has ended", t.GroupID, t.EdgeNodeID)
+		a.cfg.Logger.Debugf("%s: dropped NBIRTH: its session has ended", logNode(t))
 		if died {
 			a.nodeDied(t)
 		}
@@ -1032,9 +1131,7 @@ func (a *App) handleNBIRTH(t topic.Topic, data []byte) {
 				ours = append(ours, m)
 			}
 		}
-		if len(ours) > 0 {
-			a.setHeld(key, append(ours, a.held[key]...)) // on a tie, drain takes the held one
-		}
+		a.rehold(key, ours)
 	}
 	a.sessions[key] = &session{birthTS: birthTS, bornAt: time.Now()}
 	a.answeredRebirth(t)
@@ -1049,8 +1146,8 @@ func (a *App) handleNBIRTH(t topic.Topic, data []byte) {
 			switch {
 			case a.superseded(key, m.ts): // of a session that has ended
 			case birthMs && isData(m.t.Type) && birthTS != 0 && m.ts == birthTS:
-				a.cfg.Logger.Debugf("%s/%s: dropped %s, seq %d: in the NBIRTH's millisecond, before it (CheckBirthMillisecond)",
-					t.GroupID, t.EdgeNodeID, m.t.Type, m.seq)
+				a.cfg.Logger.Debugf("%s: dropped %s, seq %d: in the NBIRTH's millisecond, before it (CheckBirthMillisecond)",
+					logNode(t), m.t.Type, m.seq)
 			default:
 				m.nextSession = false // this NBIRTH starts their session
 				kept = append(kept, m)
@@ -1085,7 +1182,7 @@ func (a *App) nodeDied(t topic.Topic) {
 func (a *App) handleNDEATH(t topic.Topic, data []byte) {
 	p, err := payload.Decode(data)
 	if err != nil {
-		a.logWarn("decode NDEATH from %s/%s: %v", t.GroupID, t.EdgeNodeID, err)
+		a.logWarn("decode NDEATH from %s: %v", logNode(t), err)
 		return
 	}
 
@@ -1104,23 +1201,28 @@ func (a *App) handleNDEATH(t topic.Topic, data []byte) {
 			if m.GetName() == "bdSeq" {
 				if m.GetLongValue() != ns.BdSeq {
 					a.mu.Unlock()
-					a.logWarn("NDEATH bdSeq mismatch for %s/%s: got %d, expected %d",
-						t.GroupID, t.EdgeNodeID, m.GetLongValue(), ns.BdSeq)
+					a.logWarn("NDEATH bdSeq mismatch for %s: got %d, expected %d",
+						logNode(t), m.GetLongValue(), ns.BdSeq)
 					return
 				}
 			}
 		}
 		setOffline(ns)
+		if s := a.sessions[key]; s != nil {
+			s.applied = nil // the next NBIRTH takes back nothing of a dead session
+		}
 	}
 	a.mu.Unlock()
 
-	a.nodeDied(t)
+	if ns != nil { // a node never born did not die
+		a.nodeDied(t)
+	}
 }
 
 func (a *App) handleDBIRTH(t topic.Topic, data []byte) {
 	p, err := payload.Decode(data)
 	if err != nil {
-		a.logWarn("decode DBIRTH from %s/%s/%s: %v", t.GroupID, t.EdgeNodeID, t.DeviceID, err)
+		a.logWarn("decode DBIRTH from %s: %v", logDevice(t), err)
 		return
 	}
 
@@ -1141,6 +1243,7 @@ func (a *App) handleDBIRTH(t topic.Topic, data []byte) {
 		ds := &DeviceState{
 			DeviceID: t.DeviceID,
 			Online:   ns.Online,
+			Stale:    ns.Stale, // as setOffline left the node's devices
 			Metrics:  make(map[string]*pb.Payload_Metric),
 			Aliases:  make(map[uint64]string),
 		}
@@ -1158,7 +1261,7 @@ func (a *App) handleDBIRTH(t topic.Topic, data []byte) {
 	// checked against without the lock.
 	if ns != nil {
 		if err := defs.Check(stored, true); err != nil {
-			a.logWarn("DBIRTH from %s/%s/%s: %v", t.GroupID, t.EdgeNodeID, t.DeviceID, err)
+			a.logWarn("DBIRTH from %s: %v", logDevice(t), err)
 		}
 	}
 	if a.cfg.OnDeviceBirth != nil {
@@ -1169,7 +1272,7 @@ func (a *App) handleDBIRTH(t topic.Topic, data []byte) {
 func (a *App) handleDDEATH(t topic.Topic, data []byte) {
 	p, err := payload.Decode(data)
 	if err != nil {
-		a.logWarn("decode DDEATH from %s/%s/%s: %v", t.GroupID, t.EdgeNodeID, t.DeviceID, err)
+		a.logWarn("decode DDEATH from %s: %v", logDevice(t), err)
 		return
 	}
 
@@ -1198,7 +1301,7 @@ func (a *App) handleDDEATH(t topic.Topic, data []byte) {
 func (a *App) handleNDATA(t topic.Topic, data []byte) {
 	p, err := payload.Decode(data)
 	if err != nil {
-		a.logWarn("decode NDATA from %s/%s: %v", t.GroupID, t.EdgeNodeID, err)
+		a.logWarn("decode NDATA from %s: %v", logNode(t), err)
 		return
 	}
 
@@ -1225,7 +1328,7 @@ func (a *App) handleNDATA(t topic.Topic, data []byte) {
 
 	if ns != nil {
 		if err := defs.Check(p.Metrics, false); err != nil {
-			a.logWarn("NDATA from %s/%s: %v", t.GroupID, t.EdgeNodeID, err)
+			a.logWarn("NDATA from %s: %v", logNode(t), err)
 		}
 	}
 	if a.cfg.OnNodeData != nil {
@@ -1236,7 +1339,7 @@ func (a *App) handleNDATA(t topic.Topic, data []byte) {
 func (a *App) handleDDATA(t topic.Topic, data []byte) {
 	p, err := payload.Decode(data)
 	if err != nil {
-		a.logWarn("decode DDATA from %s/%s/%s: %v", t.GroupID, t.EdgeNodeID, t.DeviceID, err)
+		a.logWarn("decode DDATA from %s: %v", logDevice(t), err)
 		return
 	}
 
@@ -1265,7 +1368,7 @@ func (a *App) handleDDATA(t topic.Topic, data []byte) {
 
 	if ns != nil {
 		if err := defs.Check(p.Metrics, false); err != nil {
-			a.logWarn("DDATA from %s/%s/%s: %v", t.GroupID, t.EdgeNodeID, t.DeviceID, err)
+			a.logWarn("DDATA from %s: %v", logDevice(t), err)
 		}
 	}
 	if a.cfg.OnDeviceData != nil {
@@ -1305,8 +1408,8 @@ func (a *App) validateSeq(ns *EdgeNodeState, seq uint64, t topic.Topic) bool {
 		key := nodeKey(t.GroupID, t.EdgeNodeID)
 		if a.cfg.ReorderTimeout > 0 {
 			if _, pending := a.reorderTimers[key]; !pending {
-				a.logWarn("seq gap on %s/%s: got %d, expected %d — waiting %v for reorder",
-					t.GroupID, t.EdgeNodeID, seq, expected, a.cfg.ReorderTimeout)
+				a.logWarn("seq gap on %s: got %d, expected %d — waiting %v for reorder",
+					logNode(t), seq, expected, a.cfg.ReorderTimeout)
 				a.reorderTimers[key] = time.AfterFunc(a.cfg.ReorderTimeout, func() {
 					a.mu.Lock()
 					_, stillPending := a.reorderTimers[key]
@@ -1340,6 +1443,14 @@ func (a *App) logWarn(format string, args ...any) {
 
 func nodeKey(groupID, nodeID string) string {
 	return groupID + "/" + nodeID
+}
+
+// logNode and logDevice name the edge node or device of t in a log entry,
+// quoted: the IDs of a received topic may hold control characters.
+func logNode(t topic.Topic) string { return strconv.Quote(nodeKey(t.GroupID, t.EdgeNodeID)) }
+
+func logDevice(t topic.Topic) string {
+	return strconv.Quote(nodeKey(t.GroupID, t.EdgeNodeID) + "/" + t.DeviceID)
 }
 
 // withBirth returns the data metric m as the state keeps it: under its name
@@ -1434,13 +1545,13 @@ func (a *App) askRebirth(t topic.Topic, reason string) {
 		return
 	}
 	if a.rebirthsInFlight >= maxRebirthRequests {
-		a.cfg.Logger.Debugf("%s/%s: %s — rebirth not requested: %d requests on their way",
-			t.GroupID, t.EdgeNodeID, reason, a.rebirthsInFlight)
+		a.cfg.Logger.Debugf("%s: %s — rebirth not requested: %d requests on their way",
+			logNode(t), reason, a.rebirthsInFlight)
 		return
 	}
 	a.rebirthAsked[key] = time.Now()
 	a.rebirthsInFlight++
-	a.logWarn("%s/%s: %s — requesting rebirth", t.GroupID, t.EdgeNodeID, reason)
+	a.logWarn("%s: %s — requesting rebirth", logNode(t), reason)
 	go func() {
 		defer func() {
 			a.mu.Lock()

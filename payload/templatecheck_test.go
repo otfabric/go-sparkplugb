@@ -4,6 +4,7 @@ package payload
 
 import (
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -309,4 +310,121 @@ func FuzzTemplateDefs(f *testing.F) {
 		check("Check in a birth", defs.Check(p.GetMetrics(), true))
 		check("Check in data", defs.Check(p.GetMetrics(), false))
 	})
+}
+
+// A definition may give a member name more than once. The completeness check
+// of an instance in a birth then costs the members of the instance, not of
+// the definition.
+func TestTemplateBirthCheckFollowsInstance(t *testing.T) {
+	dt := uint32(pb.DataType_Int32)
+	member := func(name string) *pb.Payload_Metric {
+		return &pb.Payload_Metric{Name: proto.String(name), Datatype: &dt}
+	}
+	instance := func(names ...string) *pb.Payload_Template {
+		inst := &pb.Payload_Template{IsDefinition: proto.Bool(false), TemplateRef: proto.String("D")}
+		for _, n := range names {
+			inst.Metrics = append(inst.Metrics, member(n))
+		}
+		return inst
+	}
+
+	const n = 1000
+	def := &pb.Payload_Template{IsDefinition: proto.Bool(true)}
+	for range n {
+		def.Metrics = append(def.Metrics, member("a"))
+	}
+	c := TemplateDefs{"D": def}.newChecker()
+	if err := c.checkInstance([]string{"i"}, instance("a"), true); err != nil {
+		t.Fatal(err)
+	}
+	if c.steps != 1 {
+		t.Errorf("an instance of 1 member against a definition of %d: %d steps, want 1", n, c.steps)
+	}
+
+	// Repeated names still have to be all there.
+	def = &pb.Payload_Template{IsDefinition: proto.Bool(true), Metrics: []*pb.Payload_Metric{member("a"), member("a"), member("b")}}
+	defs := TemplateDefs{"D": def}
+	for _, tc := range []struct {
+		members []string
+		want    error
+	}{
+		{[]string{"a", "b"}, nil},
+		{[]string{"b", "a", "a"}, nil},
+		{[]string{"a", "a"}, ErrInvalidTemplate},
+		{[]string{"b"}, ErrInvalidTemplate},
+	} {
+		if err := defs.newChecker().checkInstance([]string{"i"}, instance(tc.members...), true); !errors.Is(err, tc.want) {
+			t.Errorf("instance %v: %v, want %v", tc.members, err, tc.want)
+		}
+	}
+}
+
+// Check takes the names of a definition from NewTemplateDefs, so that a
+// message costs the same however large the stored definition is.
+func TestTemplateCheckAllocsIndependentOfDefinition(t *testing.T) {
+	dt := uint32(pb.DataType_Int32)
+	tdt := uint32(pb.DataType_Template)
+	defsOf := func(members int) TemplateDefs {
+		def := &pb.Payload_Template{IsDefinition: proto.Bool(true)}
+		for i := range members {
+			def.Metrics = append(def.Metrics, &pb.Payload_Metric{Name: proto.String("m" + strconv.Itoa(i)), Datatype: &dt})
+			def.Parameters = append(def.Parameters, &pb.Payload_Template_Parameter{Name: proto.String("p" + strconv.Itoa(i)), Type: &dt})
+		}
+		defs, err := NewTemplateDefs([]*pb.Payload_Metric{{Name: proto.String("D"), Datatype: &tdt, Value: &pb.Payload_Metric_TemplateValue{TemplateValue: def}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return defs
+	}
+	data := []*pb.Payload_Metric{{Name: proto.String("i"), Datatype: &tdt, Value: &pb.Payload_Metric_TemplateValue{TemplateValue: &pb.Payload_Template{
+		IsDefinition: proto.Bool(false), TemplateRef: proto.String("D"),
+		Metrics:    []*pb.Payload_Metric{{Name: proto.String("m0"), Datatype: &dt}},
+		Parameters: []*pb.Payload_Template_Parameter{{Name: proto.String("p0"), Type: &dt}},
+	}}}}
+	allocs := func(defs TemplateDefs) float64 {
+		return testing.AllocsPerRun(20, func() {
+			if err := defs.Check(data, false); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	small, large := defsOf(1), defsOf(10000)
+	if s, l := allocs(small), allocs(large); l > s {
+		t.Errorf("Check against a definition of 10000 members: %v allocations, of 1 member: %v", l, s)
+	}
+}
+
+// A definition changed after NewTemplateDefs is not checked against the
+// names it had then when it has more or fewer members or parameters.
+func TestTemplateCheckDefinitionChanged(t *testing.T) {
+	def, inst := templateFixture(t)
+	defs, err := NewTemplateDefs([]*pb.Payload_Metric{def})
+	if err != nil {
+		t.Fatal(err)
+	}
+	extra, _ := NewMetric("volts", pb.DataType_Double, 0.0)
+	tv := def.GetTemplateValue()
+	tv.Metrics = append(tv.Metrics, extra)
+	data, _ := NewMetric("volts", pb.DataType_Double, 230.0)
+	it := inst.GetTemplateValue()
+	it.Metrics = []*pb.Payload_Metric{data}
+	if err := defs.Check([]*pb.Payload_Metric{inst}, false); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Sibling paths do not share an array: one does not change the other.
+func TestTemplateDeeperCopiesPath(t *testing.T) {
+	path := make([]string, 1, 4)
+	path[0] = "root"
+	a, err := deeper(path, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deeper(path, "b"); err != nil {
+		t.Fatal(err)
+	}
+	if label(a) != "root/a" {
+		t.Errorf("path %q, want root/a", label(a))
+	}
 }

@@ -12,6 +12,8 @@ Set `Config.Logger` (`sparkplugb.Logger`). `sparkplugb.NewSlogLogger` adapts an 
 | Warn | Lost transport, ignored malformed topics and payloads, seq and bdSeq problems |
 | Error | Failed auto-rebirth, server walking giving up, application code that did not return normally (`callback did not return normally: callback=<name> value=<value>`, with the stack) |
 
+`host` and `app` quote the group, edge node and device IDs of a received topic in their entries (`"group/node"`, Go syntax), since the IDs may hold control characters.
+
 A `Logger` is called from many goroutines, sometimes with a lock of the runtime held: it must not block or call the runtime. A `Logger` method that does not return normally loses its entry, and is reported once through the `Logger`'s `Errorf`. Credentials are never logged (`TestE2E_brokerLogin` checks that). Broker URLs are, so keep credentials out of them.
 
 ## Metrics
@@ -23,7 +25,7 @@ Set `Config.Metrics`. Methods are synchronous, called without a lock of the runt
 | `edge` | `OnConnect`, `OnPublish`, `OnMessage`, `OnStateChange` |
 | `host`, `app` | `OnConnect`, `OnMessage`, `OnStateChange`, `OnNodeBirth`, `OnNodeDeath` |
 
-`OnNodeBirth` and `OnNodeDeath` carry group and node IDs, so their cardinality is that of the fleet.
+`host` and `app` call `OnMessage` for every received message whose topic parses, STATE included, before the payload is decoded. `OnNodeBirth` and `OnNodeDeath` carry group and node IDs, so their cardinality is that of the fleet.
 
 A `host` or `app` `Metrics` that also implements `sparkplugb.SessionDropMetrics` gets `OnSessionDrop(groupID, edgeNodeID, messageType)` for each message dropped as belonging to a session that has ended: out of sequence and older than the NBIRTH, always, and what `Config.SessionChecks` drops ([API.md](API.md#session-checks)). Each drop is also logged at debug level, with the check that made it.
 

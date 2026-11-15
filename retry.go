@@ -63,11 +63,14 @@ func (b ExponentialBackoff) Delay(attempt int) time.Duration {
 	if ceiling <= 0 {
 		ceiling = 30 * time.Second
 	}
-	d := initial
+	d := min(initial, ceiling)
 	for i := 0; i < attempt && d < ceiling; i++ {
+		if d > ceiling/2 { // doubling would pass the ceiling, or overflow
+			d = ceiling
+			break
+		}
 		d *= 2
 	}
-	d = min(d, ceiling)
 	if b.NoJitter || d < 2 {
 		return d
 	}

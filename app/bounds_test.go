@@ -310,7 +310,7 @@ func TestApplicationNBIRTHWithDeepTemplates(t *testing.T) {
 	defer log.mu.Unlock()
 	var warned bool
 	for _, e := range log.entries {
-		warned = warned || strings.Contains(e, "NBIRTH from g1/n1") && strings.Contains(e, "nests templates deeper than 32")
+		warned = warned || strings.Contains(e, `NBIRTH from "g1/n1"`) && strings.Contains(e, "nests templates deeper than 32")
 	}
 	if !warned {
 		t.Errorf("warnings %q, want one for the nesting", log.entries)
