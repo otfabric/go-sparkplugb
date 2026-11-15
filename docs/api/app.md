@@ -135,6 +135,19 @@ type Config struct {
 	Username string
 	Password string
 
+	// SessionChecks makes stricter checks on the data messages of every edge
+	// node around its NBIRTH, beyond what Sparkplug asks for: they drop a
+	// message of the session that ended instead of applying it to the new
+	// one, and drop valid messages of edge nodes that do not meet their
+	// assumptions. None by default; see sparkplugb.SessionChecks.
+	SessionChecks sparkplugb.SessionChecks
+	// SessionChecksFor, when set, returns the checks for one edge node in
+	// place of SessionChecks. It is called for each NBIRTH and each data
+	// message, before they are applied, with none of the runtime's locks
+	// held; it must not block. If it does not return normally, SessionChecks
+	// applies.
+	SessionChecksFor func(groupID, edgeNodeID string) sparkplugb.SessionChecks
+
 	Logger        sparkplugb.Logger
 	Metrics       Metrics
 	OnState       StateHandler
