@@ -1,5 +1,28 @@
 # go-sparkplugb Releases
 
+## v0.5.0
+
+**Date:** 2026-11-15
+**Previous release:** v0.4.3
+
+Opt-in session checks for `host` and `app` (go-sparkplugb#24). Nothing changes unless they are set.
+
+### Added
+
+- **`host.Config.SessionChecks`, `app.Config.SessionChecks`: stricter checks on data around a rebirth, beyond the specification.** Sparkplug carries no session in NDATA and DDATA, and MQTT orders messages per topic only, so in two cases a message of the ending session is applied to the new one (LIMITATIONS.md). `sparkplugb.CheckBirthMillisecond` drops an NDATA or DDATA stamped in the NBIRTH's millisecond that arrived before the NBIRTH; `sparkplugb.CheckOlderInSequence` drops an NDATA or DDATA stamped before the NBIRTH that carries the `seq` the session expects next. The new session's message with that `seq` is then applied, without the rebirth it cost before. Both drop valid data of edge nodes that break their assumptions (a new-session message in the NBIRTH's millisecond delivered before it; a payload stamped with a sample time, or by a clock that went back), and each such drop costs a rebirth. Births and deaths are never dropped by them. Off by default; `sparkplugb.SessionChecksAll` sets both, and `New` refuses unknown bits.
+- **`SessionChecksFor`** chooses the checks per edge node, for a fleet where only some edge nodes meet the assumptions. It is called before each NBIRTH and data message is applied, with no lock held; if it does not return normally, `SessionChecks` applies.
+- **`sparkplugb.SessionDropMetrics`:** a `host` or `app` `Metrics` that implements `OnSessionDrop(groupID, edgeNodeID, messageType)` is told of every message dropped as of an ended session, by these checks or by the check that is always made (out of sequence and older than the NBIRTH). `Metrics` itself is unchanged. Each drop is also logged at debug level.
+
+### Documentation
+
+- API.md: a Session checks section and the new callbacks; README configuration tables; LIMITATIONS.md and OBSERVABILITY.md for the checks and the drop reporting.
+
+### Tests
+
+- `host` and `app`: both collision cases of go-sparkplugb#24 with each check, dropped and applied without a rebirth; the default behaviour pinned; births kept with both checks; the cost of each check, one rebirth for a valid message dropped; messages without a timestamp; `SessionChecksFor` on, off and panicking; `OnSessionDrop` for the checks and the default drop; unknown bits refused by `New`.
+
+---
+
 ## v0.4.3
 
 **Date:** 2026-11-14

@@ -25,6 +25,8 @@ Set `Config.Metrics`. Methods are synchronous, called without a lock of the runt
 
 `OnNodeBirth` and `OnNodeDeath` carry group and node IDs, so their cardinality is that of the fleet.
 
+A `host` or `app` `Metrics` that also implements `sparkplugb.SessionDropMetrics` gets `OnSessionDrop(groupID, edgeNodeID, messageType)` for each message dropped as belonging to a session that has ended: out of sequence and older than the NBIRTH, always, and what `Config.SessionChecks` drops ([API.md](API.md#session-checks)). Each drop is also logged at debug level, with the check that made it.
+
 ## State
 
 `Config.OnState` and `State()` give the state of a runtime. `OnState` may call the runtime ([API.md](API.md#callbacks)). `host` and `app` expose the tracked nodes through `GetNode` and `Nodes`, which return copies.

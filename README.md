@@ -351,6 +351,8 @@ carry the alias only, and `ResolveAlias` maps it back.
 | `Username`, `Password` | `string` | | Broker login, for every server. A `Password` needs a `Username`. Never logged; use `ssl://` |
 | `ClientID` | `string` | `sparkplug_host_<host id>` | MQTT client ID |
 | `ReorderTimeout` | `time.Duration` | `0` | How long a `seq` gap may stay open before a rebirth request; `0` requests it at once |
+| `SessionChecks` | `sparkplugb.SessionChecks` | none | Opt-in checks beyond the specification that drop data of an ended session around a rebirth, and valid data of edge nodes that break their assumptions ([LIMITATIONS.md](LIMITATIONS.md)) |
+| `SessionChecksFor` | `func(groupID, edgeNodeID string) sparkplugb.SessionChecks` | none | `SessionChecks` per edge node, in place of `SessionChecks` |
 | `Logger` | `sparkplugb.Logger` | none | Logger |
 | `Metrics` | `host.Metrics` | none | Connect, message, state-change, node birth and death callbacks |
 | `OnState` | `func` | | State change callback, called without the runtime's locks held: it may call the runtime |
@@ -369,6 +371,8 @@ carry the alias only, and `ResolveAlias` maps it back.
 | `ServerURLs` | `[]string` | | Multiple broker URLs (fallback) |
 | `Username`, `Password` | `string` | | Broker login, for every server. A `Password` needs a `Username`. Never logged; use `ssl://` |
 | `ClientID` | `string` | `sparkplug_app_` and 8 random hex digits | MQTT client ID |
+| `SessionChecks` | `sparkplugb.SessionChecks` | none | Opt-in checks beyond the specification that drop data of an ended session around a rebirth, and valid data of edge nodes that break their assumptions ([LIMITATIONS.md](LIMITATIONS.md)) |
+| `SessionChecksFor` | `func(groupID, edgeNodeID string) sparkplugb.SessionChecks` | none | `SessionChecks` per edge node, in place of `SessionChecks` |
 | `Logger` | `sparkplugb.Logger` | none | Logger |
 | `Metrics` | `app.Metrics` | none | Connect, message, state-change, node birth and death callbacks |
 | `OnState` | `func` | | State change callback, called without the runtime's locks held: it may call the runtime |

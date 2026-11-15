@@ -83,6 +83,19 @@ type Config struct {
 
 	ReorderTimeout time.Duration
 
+	// SessionChecks makes stricter checks on the data messages of every edge
+	// node around its NBIRTH, beyond what Sparkplug asks for: they drop a
+	// message of the session that ended instead of applying it to the new
+	// one, and drop valid messages of edge nodes that do not meet their
+	// assumptions. None by default; see sparkplugb.SessionChecks.
+	SessionChecks sparkplugb.SessionChecks
+	// SessionChecksFor, when set, returns the checks for one edge node in
+	// place of SessionChecks. It is called for each NBIRTH and each data
+	// message, before they are applied, with none of the runtime's locks
+	// held; it must not block. If it does not return normally, SessionChecks
+	// applies.
+	SessionChecksFor func(groupID, edgeNodeID string) sparkplugb.SessionChecks
+
 	Logger        sparkplugb.Logger
 	Metrics       Metrics
 	OnState       StateHandler
@@ -167,6 +180,9 @@ func New(transport mqtt.Transport, cfg Config) (*App, error) {
 	}
 	if cfg.ClientID == "" {
 		cfg.ClientID = fmt.Sprintf("sparkplug_host_%s", cfg.HostID)
+	}
+	if cfg.SessionChecks&^sparkplugb.SessionChecksAll != 0 {
+		return nil, fmt.Errorf("sparkplugb: unknown SessionChecks %#x", uint8(cfg.SessionChecks&^sparkplugb.SessionChecksAll))
 	}
 	if cfg.Metrics == nil {
 		cfg.Metrics = NopMetrics{}
@@ -596,12 +612,26 @@ func (s *session) remember(m heldMsg) {
 // the ending session that arrives with the seq this one expects next; the
 // message of this session with that seq is then behind the sequence, and a
 // rebirth follows (see expectSession, and LIMITATIONS.md).
+//
+// With CheckOlderInSequence, an NDATA or DDATA in sequence but published
+// before the current NBIRTH is dropped too (see sparkplugb.SessionChecks).
 func (a *App) hold(t topic.Topic, data []byte) bool {
 	p, err := payload.Decode(data)
 	if err != nil {
 		return false // the handler reports it
 	}
-	seq, ts := p.GetSeq(), p.GetTimestamp()
+	checks := a.sessionChecks(t)
+	held, dropped := a.holdLocked(t, data, p.GetSeq(), p.GetTimestamp(), checks)
+	if dropped {
+		a.sessionDropped([]topic.Topic{t})
+	}
+	return held
+}
+
+// holdLocked is hold once the message is decoded. It reports whether the
+// message is held or dropped, and whether it was dropped as of a session that
+// has ended.
+func (a *App) holdLocked(t topic.Topic, data []byte, seq, ts uint64, checks sparkplugb.SessionChecks) (held, dropped bool) {
 	key := nodeKey(t.GroupID, t.EdgeNodeID)
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -612,18 +642,23 @@ func (a *App) hold(t topic.Topic, data []byte) bool {
 	if ns != nil {
 		expected := (ns.LastSeq + 1) % 256
 		if seq == expected {
+			if checks&sparkplugb.CheckOlderInSequence != 0 && isData(t.Type) && a.superseded(key, ts) {
+				a.cfg.Logger.Debugf("%s/%s: dropped %s, seq %d: in sequence, published before the NBIRTH (CheckOlderInSequence)",
+					t.GroupID, t.EdgeNodeID, t.Type, seq)
+				return true, true
+			}
 			a.sessions[key].remember(heldMsg{t: t, seq: seq, data: data, ts: ts})
-			return false
+			return false, false
 		}
 		if a.superseded(key, ts) {
 			a.cfg.Logger.Debugf("%s/%s: dropped %s, seq %d: published before the NBIRTH",
 				t.GroupID, t.EdgeNodeID, t.Type, seq)
-			return true
+			return true, true
 		}
 		behind = (seq-expected+256)%256 > 128
 	}
 	if len(a.held[key]) >= maxHeld || len(data) > maxHeldBytes {
-		return false
+		return false, false
 	}
 	for a.heldCount >= maxHeldTotal || a.heldBytes+len(data) > maxHeldBytes {
 		a.dropOldestHeld()
@@ -637,7 +672,39 @@ func (a *App) hold(t topic.Topic, data []byte) bool {
 	default:
 		a.validateSeq(ns, seq, t) // starts the reorder timer or requests a rebirth
 	}
-	return true
+	return true, false
+}
+
+// isData reports whether a message of type mt is NDATA or DDATA, the only
+// messages that sparkplugb.SessionChecks drop.
+func isData(mt topic.MessageType) bool {
+	return mt == topic.NDATA || mt == topic.DDATA
+}
+
+// sessionChecks returns the SessionChecks for the edge node of t. Called with
+// none of the runtime's locks held.
+func (a *App) sessionChecks(t topic.Topic) sparkplugb.SessionChecks {
+	checks := a.cfg.SessionChecks
+	if f := a.cfg.SessionChecksFor; f != nil {
+		c := checks
+		if callback.Run(a.cfg.Logger, "Config.SessionChecksFor", func() { c = f(t.GroupID, t.EdgeNodeID) }) {
+			checks = c
+		}
+	}
+	return checks
+}
+
+// sessionDropped reports the messages dropped as of a session that has ended
+// to the Metrics, when they implement sparkplugb.SessionDropMetrics. Called
+// with none of the runtime's locks held.
+func (a *App) sessionDropped(ts []topic.Topic) {
+	m, ok := a.cfg.Metrics.(sparkplugb.SessionDropMetrics)
+	if !ok {
+		return
+	}
+	for _, t := range ts {
+		callback.Run(a.cfg.Logger, "Metrics.OnSessionDrop", func() { m.OnSessionDrop(t.GroupID, t.EdgeNodeID, t.Type.String()) })
+	}
 }
 
 // maxHeldTotal and maxHeldBytes bound the messages held for reordering over
@@ -909,6 +976,8 @@ func (a *App) handleNBIRTH(t topic.Topic, data []byte) {
 		a.logWarn("NBIRTH from %s/%s: %v", t.GroupID, t.EdgeNodeID, err)
 	}
 
+	birthMs := a.sessionChecks(t)&sparkplugb.CheckBirthMillisecond != 0
+
 	a.mu.Lock()
 	if late, died := a.lateBirth(t, p); late {
 		a.mu.Unlock()
@@ -953,10 +1022,12 @@ func (a *App) handleNBIRTH(t topic.Topic, data []byte) {
 		// ended, is of this session: the state it went into is gone. So is a
 		// message of the same millisecond: an edge node's births share it, and
 		// data can follow them that fast. Had it come before this NBIRTH, its
-		// value is in the NBIRTH and its seq does not follow it.
+		// value is in the NBIRTH and its seq does not follow it. With
+		// CheckBirthMillisecond, data of the same millisecond is taken for
+		// the ended session's.
 		var ours []heldMsg
 		for _, m := range prev.applied {
-			if m.ts >= birthTS {
+			if m.ts > birthTS || m.ts == birthTS && (!birthMs || !isData(m.t.Type)) {
 				m.at = time.Now()
 				ours = append(ours, m)
 			}
@@ -971,14 +1042,21 @@ func (a *App) handleNBIRTH(t topic.Topic, data []byte) {
 		timer.Stop()
 		delete(a.sessionTimers, key)
 	}
+	var dropped []topic.Topic
 	if held := a.held[key]; len(held) > 0 {
 		kept := make([]heldMsg, 0, len(held))
 		for _, m := range held {
-			if a.superseded(key, m.ts) {
-				continue // of a session that has ended
+			switch {
+			case a.superseded(key, m.ts): // of a session that has ended
+			case birthMs && isData(m.t.Type) && birthTS != 0 && m.ts == birthTS:
+				a.cfg.Logger.Debugf("%s/%s: dropped %s, seq %d: in the NBIRTH's millisecond, before it (CheckBirthMillisecond)",
+					t.GroupID, t.EdgeNodeID, m.t.Type, m.seq)
+			default:
+				m.nextSession = false // this NBIRTH starts their session
+				kept = append(kept, m)
+				continue
 			}
-			m.nextSession = false // this NBIRTH starts their session
-			kept = append(kept, m)
+			dropped = append(dropped, m.t)
 		}
 		a.setHeld(key, kept)
 	}
@@ -987,6 +1065,7 @@ func (a *App) handleNBIRTH(t topic.Topic, data []byte) {
 		delete(a.reorderTimers, key)
 	}
 	a.mu.Unlock()
+	a.sessionDropped(dropped)
 
 	callback.Run(a.cfg.Logger, "Metrics.OnNodeBirth", func() { a.cfg.Metrics.OnNodeBirth(t.GroupID, t.EdgeNodeID) })
 	if a.cfg.OnNodeBirth != nil {
