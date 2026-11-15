@@ -12,9 +12,10 @@ Package payload builds, encodes and decodes Sparkplug B Protobuf payloads: metri
 
 ```go
 const (
-	// MaxArrayElements bounds the elements of a decoded BooleanArray or StringArray.
+	// MaxArrayElements bounds the elements of an array returned by GetValue.
 	MaxArrayElements = 1 << 20 // 1M elements
-	// MaxStringBytes bounds a string returned by GetValue, scalar or array element.
+	// MaxStringBytes bounds a string returned by GetValue, scalar or array
+	// element, GetPropertyValue or GetTemplateParameterValue.
 	MaxStringBytes = 1 << 24 // 16 MiB
 )
 ```
@@ -76,7 +77,8 @@ var (
 	ErrUnknownType   = errors.New("sparkplugb: unknown datatype")
 	ErrNilMetric     = errors.New("sparkplugb: nil metric")
 	ErrArrayTooLarge = errors.New("sparkplugb: array exceeds maximum size")
-	// ErrStringTooLarge is returned by GetValue for a string above MaxStringBytes.
+	// ErrStringTooLarge is returned by GetValue, GetPropertyValue and
+	// GetTemplateParameterValue for a string above MaxStringBytes.
 	ErrStringTooLarge = errors.New("sparkplugb: string exceeds maximum size")
 )
 ```
@@ -136,7 +138,7 @@ GetDataSetValues extracts all rows from a DataSet metric as \[]\[]any. A value h
 func GetPropertyValue(p *pb.Payload_PropertyValue) (any, error)
 ```
 
-GetPropertyValue extracts the Go value from a PropertyValue. It has the Go type GetValue returns for the datatype, and integers and DateTime are decoded by the rules of GetValue: one that is not a value of the datatype, or a value carried in another field than the datatype's, returns ErrTypeMismatch. A PropertyValue with is\_null set is nil, one without a value the zero value. A PropertySet or PropertySetList is the PropertyValue's own, not a copy.
+GetPropertyValue extracts the Go value from a PropertyValue. It has the Go type GetValue returns for the datatype, and integers and DateTime are decoded by the rules of GetValue: one that is not a value of the datatype, or a value carried in another field than the datatype's, returns ErrTypeMismatch, and a string above MaxStringBytes ErrStringTooLarge. A PropertyValue with is\_null set is nil, one without a value the zero value. A PropertySet or PropertySetList is the PropertyValue's own, not a copy.
 
 ### func GetQuality
 
@@ -152,7 +154,7 @@ GetQuality returns the "quality" property of m. The value of a property is Int32
 func GetTemplateParameterValue(p *pb.Payload_Template_Parameter) (any, error)
 ```
 
-GetTemplateParameterValue extracts the Go value from a template parameter. It has the Go type GetValue returns for the datatype: integers and DateTime are decoded by the rules of GetValue, and one that is not a value of the datatype, or a value carried in another field than the datatype's, returns ErrTypeMismatch. A parameter without a value reads as the zero value. The members of a template are metrics: GetValue reads them.
+GetTemplateParameterValue extracts the Go value from a template parameter. It has the Go type GetValue returns for the datatype: integers and DateTime are decoded by the rules of GetValue, and one that is not a value of the datatype, or a value carried in another field than the datatype's, returns ErrTypeMismatch, and a string above MaxStringBytes ErrStringTooLarge. A parameter without a value reads as the zero value. The members of a template are metrics: GetValue reads them.
 
 ### func GetValue
 
@@ -162,7 +164,7 @@ func GetValue(m *pb.Payload_Metric) (any, error)
 
 GetValue returns the value of m as the Go type of its datatype: int8 to int64 and uint8 to uint64 for the integers, time.Time for DateTime, float32, float64, bool, string for String, Text and UUID, \[]byte for Bytes and File, \*pb.Payload\_DataSet, \*pb.Payload\_Template, and a slice of the element type for an array. A metric with is\_null set is nil. A metric without a value reads as the zero value of its type, and an array as one decoded from no bytes.
 
-A value carried in another field than its datatype's, a string in a Float metric for one, returns ErrTypeMismatch, as does an integer out of the datatype's range. The \[]byte of Bytes and File, the DataSet and the Template are the metric's own: they change with it. Arrays are decoded into new slices.
+A value carried in another field than its datatype's, a string in a Float metric for one, returns ErrTypeMismatch, as does an integer out of the datatype's range. A string above MaxStringBytes returns ErrStringTooLarge, and an array of more than MaxArrayElements elements ErrArrayTooLarge. The \[]byte of Bytes and File, the DataSet and the Template are the metric's own: they change with it. Arrays are decoded into new slices.
 
 ### func NewAliasMetric
 
@@ -275,6 +277,8 @@ type TemplateDefs map[string]*pb.Payload_Template
 TemplateDefs are the template definitions of an edge node's NBIRTH, by the name of the metric that carries each one: the names that the template\_ref of an instance refers to. A nil TemplateDefs has no definitions.
 
 Sparkplug gives the version of a template no matching rule, so instances are matched to definitions by template\_ref alone; a version is only checked to be UTF-8.
+
+NewTemplateDefs indexes the member and parameter names of the definitions it returns, so that Check works in proportion to the message it checks, not to the definitions. Do not change those definitions afterwards: Check would go on using the names they had. Check may be called concurrently.
 
 #### func NewTemplateDefs
 

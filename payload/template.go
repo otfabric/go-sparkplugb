@@ -108,7 +108,8 @@ func NewTemplateParameter(name string, dt pb.DataType, v any) (*pb.Payload_Templ
 // has the Go type GetValue returns for the datatype: integers and DateTime are
 // decoded by the rules of GetValue, and one that is not a value of the datatype,
 // or a value carried in another field than the datatype's, returns
-// ErrTypeMismatch. A parameter without a value reads as the zero value. The
+// ErrTypeMismatch, and a string above MaxStringBytes ErrStringTooLarge. A
+// parameter without a value reads as the zero value. The
 // members of a template are metrics: GetValue reads them.
 func GetTemplateParameterValue(p *pb.Payload_Template_Parameter) (any, error) {
 	if p == nil {
@@ -155,6 +156,9 @@ func GetTemplateParameterValue(p *pb.Payload_Template_Parameter) (any, error) {
 		case nil:
 			return "", nil
 		case *pb.Payload_Template_Parameter_StringValue:
+			if len(v.StringValue) > MaxStringBytes {
+				return nil, ErrStringTooLarge
+			}
 			return v.StringValue, nil
 		}
 	default:

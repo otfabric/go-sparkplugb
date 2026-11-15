@@ -23,6 +23,10 @@ All three runtimes take a transport and a `Config`: `New(transport, cfg)`, then 
 
 An edge node goes through `PublishBirth`, `PublishDeviceBirth`, then `PublishNodeData`, `PublishDeviceData` and `PublishDeviceDeath`. Data before the birth returns `ErrNoBirth`. Aliases must be unique across the node: a birth that breaks that returns `ErrDuplicateID`. Template definitions go in the NBIRTH only, and every template instance of the node and its devices refers to one of them: a message that breaks that returns `payload.ErrUnknownTemplate` or `payload.ErrInvalidTemplate` and is not published. `payload.NewTemplateDefs` and `TemplateDefs.Check` do the same check for a caller; `host` and `app` use them on receipt and log what breaks it.
 
+An edge node has one connection at a time: `Connect` while it is connecting or connected returns `ErrAlreadyConnected` and leaves the connection as it is. `Rebirth` repeats the births of the current connection: before the program's `PublishBirth` on that connection it returns `ErrNoBirth` and publishes nothing, and so does a rebirth an NCMD asks for. After `Disconnect` or a lost connection every device is offline until `PublishDeviceBirth` is called for it again, so a rebirth repeats only the DBIRTHs of the current connection. A message that `Publish` hands to the transport takes its `seq` even when the transport returns an error, since the message may have gone out; one that is not handed over, for a `ctx` that has already ended, does not.
+
+In `host` and `app`, an NDEATH of an edge node that was never born calls neither `OnNodeDeath` nor `Metrics.OnNodeDeath`.
+
 ## Callbacks
 
 | Callback | Called on | Locks of the runtime held | May call the runtime |
@@ -37,7 +41,9 @@ An edge node goes through `PublishBirth`, `PublishDeviceBirth`, then `PublishNod
 
 `OnState` is called once per transition, one call at a time, in the order of the transitions. `Disconnected` after `Disconnect`, or after a `Connect` that failed, is delivered once the runtime has ended the connection, so a `Connect` from the handler is not ended with it. The edge node does not publish an NBIRTH on its own: publish it from `OnState` when the state becomes `Online`, which also covers the session after a walk to another server ([examples/server-walking](examples/server-walking/main.go)). The next message waits for a message callback to return, so it should not block (ARCHITECTURE.md, "Goroutines").
 
-A callback, `Metrics` method, `Logger` method, `BdSeqStore` or `RetryPolicy` that does not return normally is recovered where the runtime calls it and logged at error level, `callback did not return normally: callback=<name> value=<value>` with the stack, once the runtime holds none of its locks. The runtime goes on: the message is applied as without the callback, a `BdSeqStore` fails `Connect`, a `RetryPolicy` ends the walk, a `Logger` loses the entry.
+A callback, `Metrics` method, `Logger` method, `BdSeqStore` or `RetryPolicy` that does not return normally is recovered where the runtime calls it and logged at error level, `callback did not return normally: callback=<name> value=<value>` with the stack, once the runtime holds none of its locks. The runtime goes on: the message is applied as without the callback, a `BdSeqStore` fails `Connect`, a `RetryPolicy` ends the walk, a `Logger` loses the entry. A callback that ends its goroutine with `runtime.Goexit` (`testing.T.FailNow`, for one) is not recovered: only the edge node's `BdSeqStore` is handled, and leaves the node `Disconnected`.
+
+An NCMD that sets `Node Control/Rebirth` to true, by name or by the alias the node's NBIRTH gave it, starts a rebirth; its other metrics, if any, still go to `OnNodeCmd`. `OnDeviceCmd` receives the device ID of the DCMD topic as it is, also one the node never published a DBIRTH for: the handler checks it.
 
 ## Session checks
 
@@ -70,6 +76,6 @@ Births and deaths are never dropped by these checks, and a message without a tim
 
 `mqtt.Transport` has `Connect`, `Publish`, `Subscribe` and `Disconnect`. An implementation honours the fields of `ConnectOpts`, `Username` and `Password` included, and reports a lost connection through `OnConnectionLost` with an error wrapping `ErrConnectionLost`. It gives each message a payload slice of its own, which it does not use or change after the handler is called.
 
-`PahoTransport` returns from `Connect` when the broker accepts the connection, `ctx` ends or `ConnectTimeout` passes, whichever comes first, and an attempt that ended with `ctx` or the timeout does not connect later. It does not hold its lock while it waits: `Disconnect` during `Connect` returns at once and ends the attempt. Its zero value uses the timeouts of `NewPahoTransport`.
+`PahoTransport` returns from `Connect` when the broker accepts the connection, `ctx` ends or `ConnectTimeout` passes, whichever comes first, and an attempt that ended with `ctx` or the timeout does not connect later. It does not hold its lock while it waits: `Disconnect` during `Connect` returns at once and ends the attempt. Its zero value uses the timeouts of `NewPahoTransport`. `Connect` on a live connection ends it first, as `Disconnect` does (DISCONNECT, so the broker discards the will), without calling that connection's `OnConnectionLost`: at most one connection is up.
 
 Errors: [ERRORS.md](ERRORS.md).

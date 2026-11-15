@@ -11,7 +11,8 @@ distinct values.
 |---|---|
 | `ErrClosed` | `Connect` is called on a closed node, or `Close` is called while `Connect` or a walk to another server is in progress |
 | `ErrNotConnected` | `PublishBirth` or `Rebirth` is called when the node is not online |
-| `ErrNoBirth` | Node data or a device birth, data or death comes before the node's birth |
+| `ErrNoBirth` | Node data or a device birth, data or death comes before the node's birth; `Rebirth` before the program's `PublishBirth` on the current connection |
+| `ErrAlreadyConnected` | `Connect` while the node is connecting or connected; `Disconnect` first |
 | `ErrDuplicateID` | `PublishBirth` or `PublishDeviceBirth` uses an alias twice, or one of another part of the edge node |
 | `payload.ErrUnknownTemplate` | A template instance in `PublishBirth`, `PublishDeviceBirth`, `PublishNodeData` or `PublishDeviceData` refers to a definition that the NBIRTH does not have |
 | `payload.ErrInvalidTemplate` | A template in one of those breaks another rule of Sparkplug for templates, for one a definition outside the NBIRTH ([payload](#payload)) |
@@ -53,8 +54,8 @@ Received templates: as `host`.
 | `ErrTypeMismatch` | The value does not have the datatype: on `SetValue`, `NewDataSet`, `NewTemplateParameter` and `NewPropertyValue` its Go type, a wire value out of range, or a `time.Time` before the epoch; on `GetValue`, `GetDataSetValues`, `GetTemplateParameterValue` and `GetPropertyValue` an integer that is out of the datatype's range, or a value carried in another field than the datatype's, for every datatype: a string in a Float metric, a template in a DataSet metric ([Integers](INTEROPERABILITY.md#integers)) |
 | `ErrUnknownType` | The datatype is not one the codec knows; `NewDataSet` with a column type that is not basic (Int8 to Text); `GetDataSetValues` meets a cell with a value in such a column |
 | `ErrInvalidArray` | Array bytes are not a valid encoding of the datatype |
-| `ErrArrayTooLarge` | A BooleanArray or StringArray has more than `MaxArrayElements` elements |
-| `ErrStringTooLarge` | `GetValue` meets a string or StringArray element above `MaxStringBytes` |
+| `ErrArrayTooLarge` | `GetValue` meets an array, of any array datatype, with more than `MaxArrayElements` elements |
+| `ErrStringTooLarge` | `GetValue` meets a string or StringArray element above `MaxStringBytes`; `GetPropertyValue` or `GetTemplateParameterValue` a string above it |
 | `ErrColumnMismatch` | A DataSet's columns, types or rows disagree in count: on `NewDataSet`, and on `GetDataSetValues` columns and types of different counts, a `num_of_columns` that differs from them, or a row with more cells than the DataSet has types |
 | `ErrUnknownTemplate` | `NewTemplateDefs` or `TemplateDefs.Check` meets a template instance whose `template_ref` names no definition of the NBIRTH |
 | `ErrInvalidTemplate` | `NewTemplateDefs` or `TemplateDefs.Check` meets a template that breaks another rule of Sparkplug 3.0.0 6.4.13–6.4.14: a definition outside the NBIRTH, with a `template_ref`, without a name or twice; an instance without `is_definition` or `template_ref`; a member or parameter its definition lacks; an instance in a birth without every member of its definition; a version, `template_ref` or parameter name that is not UTF-8; a parameter of a definition without name or type, or of a type that is not basic; templates nested more than 32 deep |

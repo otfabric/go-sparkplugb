@@ -44,10 +44,10 @@ logged and does not stop them ([API.md](API.md#callbacks)).
 
 | Limit | Default | Option |
 |---|---|---|
-| Elements of a BooleanArray or StringArray (`payload.GetValue`) | `payload.MaxArrayElements` (1 << 20) | none |
-| Bytes of a string or StringArray element (`payload.GetValue`) | `payload.MaxStringBytes` (1 << 24) | none |
+| Elements of an array, of any array datatype (`payload.GetValue`) | `payload.MaxArrayElements` (1 << 20) | none |
+| Bytes of a string or StringArray element (`payload.GetValue`); of a string (`payload.GetPropertyValue`, `payload.GetTemplateParameterValue`) | `payload.MaxStringBytes` (1 << 24) | none |
 | Template nesting (`payload.NewTemplateDefs`, `TemplateDefs.Check`, and so `host` and `app` on receipt) | 32 levels: deeper is `ErrInvalidTemplate` | none |
-| Messages held for reordering (`host`, `app`) | 256 per edge node; 4096, and 8 MiB of payload, over all edge nodes, the oldest dropped first; a message above 8 MiB is not held; every held message at most 30 seconds, of every edge node | none |
+| Messages held for reordering (`host`, `app`) | 256 per edge node; 4096, and 8 MiB of payload, over all edge nodes, the oldest dropped first; a message above 8 MiB is not held; every held message at most 30 seconds (30 s + 1 s), of every edge node, also when no further message arrives. The last 32 applied messages of each edge node, each at most 8 MiB, are kept for its next NBIRTH, held again within the bounds above, and cleared on NDEATH | none |
 | Pending rebirth requests (`host`, `app`) | one per node, for the next NBIRTH or 2 seconds; 16 on their way over all nodes | none |
 | Connect timeout (`PahoTransport`) | 10 s | `ConnectTimeout` |
 | Publish and subscribe timeout (`PahoTransport`) | 5 s | `PublishTimeout` |
@@ -60,7 +60,7 @@ Gosec and Opengrep scans run on a maintainer's machine before each release, with
 
 - No library limit on the size of a received payload: `payload.Decode` takes what
   the broker delivers, so bound the message size at the broker. The limits above apply
-  afterwards, in `payload.GetValue`, and not to DataSet cells or template parameters.
+  afterwards, in `payload.GetValue`, and not to DataSet cells.
 - `MaxArrayElements` bounds the elements of a StringArray, not the memory of the
   decoded slice: each element takes a string header besides its bytes, and the
   elements are counted as they are decoded (`TestDecodeLimitsAllocationBudget`

@@ -94,3 +94,25 @@ func TestExponentialBackoffJitter(t *testing.T) {
 		t.Error("jitter should produce varying delays")
 	}
 }
+
+// A delay near the largest Duration stays at Max, and never wraps around
+// to a negative or zero wait.
+func TestExponentialBackoffLargeDelays(t *testing.T) {
+	const most = time.Duration(1<<63 - 1)
+	for _, b := range []ExponentialBackoff{
+		{Initial: most/2 + 1, Max: most, NoJitter: true},
+		{Initial: most - 1, Max: most, NoJitter: true},
+		{Initial: 3 * time.Second, Max: most, NoJitter: true},
+		{Initial: time.Hour, Max: time.Minute, NoJitter: true},
+	} {
+		for _, attempt := range []int{0, 1, 2, 62, 63, 64, 1000} {
+			d := b.Delay(attempt)
+			if d <= 0 || d > b.Max {
+				t.Errorf("Initial %v, Max %v: Delay(%d) = %v, want in (0, Max]", b.Initial, b.Max, attempt, d)
+			}
+		}
+	}
+	if d := (ExponentialBackoff{Initial: most/2 + 1, Max: most, NoJitter: true}).Delay(1); d != most {
+		t.Errorf("Delay(1) = %v, want Max", d)
+	}
+}

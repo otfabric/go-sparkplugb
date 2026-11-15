@@ -5,8 +5,11 @@ package payload
 import (
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
+	"sync"
 	"unicode/utf8"
+	"weak"
 
 	pb "github.com/otfabric/go-sparkplugb/proto"
 )
@@ -38,6 +41,11 @@ const maxTemplateDepth = 32
 // Sparkplug gives the version of a template no matching rule, so instances
 // are matched to definitions by template_ref alone; a version is only
 // checked to be UTF-8.
+//
+// NewTemplateDefs indexes the member and parameter names of the definitions
+// it returns, so that Check works in proportion to the message it checks,
+// not to the definitions. Do not change those definitions afterwards: Check
+// would go on using the names they had. Check may be called concurrently.
 type TemplateDefs map[string]*pb.Payload_Template
 
 // NewTemplateDefs returns the template definitions of the metrics of an
@@ -77,6 +85,9 @@ func NewTemplateDefs(nbirth []*pb.Payload_Metric) (TemplateDefs, error) {
 			defs = make(TemplateDefs)
 		}
 		defs[name] = t
+	}
+	for _, t := range defs {
+		indexNames(t)
 	}
 	c := defs.newChecker()
 	for _, m := range nbirth {
@@ -161,7 +172,8 @@ func deeper(path []string, name string) ([]string, error) {
 	if len(path) >= maxTemplateDepth {
 		return nil, fmt.Errorf("sparkplugb: template %q nests templates deeper than %d: %w", label(path), maxTemplateDepth, ErrInvalidTemplate)
 	}
-	return append(path, name), nil
+	// A new array: the paths of sibling members must not share one.
+	return append(path[:len(path):len(path)], name), nil
 }
 
 // checkNested checks the templates among the members of a definition: an
@@ -217,25 +229,46 @@ func (d TemplateDefs) definition(path []string, t *pb.Payload_Template) (*pb.Pay
 type checker struct {
 	defs  TemplateDefs
 	names map[*pb.Payload_Template]*defNames
+	// steps counts the member names checkInstance has looked at; tests
+	// use it to see that the work follows the instances, not the
+	// definitions.
+	steps int
 }
 
-// defNames are the member and parameter names of a definition.
+// defNames are the member and parameter names of a definition, and the
+// number of members and parameters it had when they were taken.
 type defNames struct {
-	members map[string]struct{}
-	params  map[string]struct{}
+	members  map[string]struct{}
+	params   map[string]struct{}
+	nMembers int
+	nParams  int
 }
 
-func (d TemplateDefs) newChecker() *checker {
-	return &checker{defs: d}
+// matches reports whether n may still be the names of def: it has as many
+// members and parameters as it had.
+func (n *defNames) matches(def *pb.Payload_Template) bool {
+	return n.nMembers == len(def.GetMetrics()) && n.nParams == len(def.GetParameters())
 }
 
-func (c *checker) namesOf(def *pb.Payload_Template) *defNames {
-	if n, ok := c.names[def]; ok {
-		return n
+// indexed holds the names of the definitions that NewTemplateDefs returned,
+// by a weak pointer to the definition: an entry is removed when its
+// definition is no longer reachable.
+var indexed sync.Map // weak.Pointer[pb.Payload_Template] -> *defNames
+
+// indexNames takes the names of def into indexed.
+func indexNames(def *pb.Payload_Template) {
+	key := weak.Make(def)
+	if _, loaded := indexed.LoadOrStore(key, buildNames(def)); !loaded {
+		runtime.AddCleanup(def, func(k weak.Pointer[pb.Payload_Template]) { indexed.Delete(k) }, key)
 	}
+}
+
+func buildNames(def *pb.Payload_Template) *defNames {
 	n := &defNames{
-		members: make(map[string]struct{}, len(def.GetMetrics())),
-		params:  make(map[string]struct{}, len(def.GetParameters())),
+		members:  make(map[string]struct{}, len(def.GetMetrics())),
+		params:   make(map[string]struct{}, len(def.GetParameters())),
+		nMembers: len(def.GetMetrics()),
+		nParams:  len(def.GetParameters()),
 	}
 	for _, m := range def.GetMetrics() {
 		n.members[m.GetName()] = struct{}{}
@@ -243,6 +276,25 @@ func (c *checker) namesOf(def *pb.Payload_Template) *defNames {
 	for _, p := range def.GetParameters() {
 		n.params[p.GetName()] = struct{}{}
 	}
+	return n
+}
+
+func (d TemplateDefs) newChecker() *checker {
+	return &checker{defs: d}
+}
+
+// namesOf returns the names of def: those NewTemplateDefs took, or else
+// those taken for this checker.
+func (c *checker) namesOf(def *pb.Payload_Template) *defNames {
+	if v, ok := indexed.Load(weak.Make(def)); ok {
+		if n := v.(*defNames); n.matches(def) {
+			return n
+		}
+	}
+	if n, ok := c.names[def]; ok {
+		return n
+	}
+	n := buildNames(def)
 	if c.names == nil {
 		c.names = make(map[*pb.Payload_Template]*defNames)
 	}
@@ -273,6 +325,7 @@ func (c *checker) checkInstance(path []string, t *pb.Payload_Template, birth boo
 			return fmt.Errorf("sparkplugb: template instance %q has member %q, which definition %q does not have: %w",
 				label(path), mn, t.GetTemplateRef(), ErrInvalidTemplate)
 		}
+		c.steps++
 		seen[mn] = struct{}{}
 		if nt := member.GetTemplateValue(); nt != nil {
 			mp, err := deeper(path, mn)
@@ -287,8 +340,14 @@ func (c *checker) checkInstance(path []string, t *pb.Payload_Template, birth boo
 			}
 		}
 	}
-	if birth {
+	// Every name in seen is one of the definition, so the instance has all
+	// members exactly when it has as many distinct names. The definition's
+	// members are only gone through to name a missing one: a definition may
+	// give a name more than once, and going through them for every instance
+	// would cost the size of the definition, not of the instance.
+	if birth && len(seen) != len(names.members) {
 		for _, m := range def.GetMetrics() {
+			c.steps++
 			if _, ok := seen[m.GetName()]; !ok {
 				return fmt.Errorf("sparkplugb: template instance %q in a birth lacks member %q of definition %q: %w",
 					label(path), m.GetName(), t.GetTemplateRef(), ErrInvalidTemplate)

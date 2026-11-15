@@ -30,7 +30,7 @@ Every call of application code (the callbacks of `Config`, `Metrics`, the `Logge
 
 ## Reordering
 
-`host` and `app` hold messages out of `seq` order, at most 256 per node, 4096 and 8 MiB of payload over all nodes, and 30 seconds: [INTEROPERABILITY.md](INTEROPERABILITY.md#host-and-application-behaviour). When a message is held or an NDEATH handled, at most once a second, the messages of every node that waited longer are dropped, and the rebirth requests and deaths whose time has passed are forgotten, so a node that sends nothing more leaves nothing behind.
+`host` and `app` hold messages out of `seq` order, at most 256 per node, 4096 and 8 MiB of payload over all nodes, and 30 seconds: [INTEROPERABILITY.md](INTEROPERABILITY.md#host-and-application-behaviour). When a message is held or an NDEATH handled, at most once a second, and on a timer while messages are held, the messages of every node that waited longer are dropped, and the rebirth requests and deaths whose time has passed are forgotten, so a node that sends nothing more leaves nothing behind: a held message is dropped at most 30 s + 1 s after it arrived, also when no further message arrives. An NBIRTH takes back the messages of the ended session applied after the gap (the last 32 per node) and holds them again within the same bounds; an NDEATH clears them. Making room drops the oldest held messages in one pass.
 
 ## Generated code
 

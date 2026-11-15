@@ -42,6 +42,7 @@ type Application struct {
 	// their payload bytes
 	// held messages dropped for maxHeldTotal and maxHeldBytes
 	// when sweep last ran
+	// pending sweep of the held messages (armSweep)
 	// rebirth requests being sent (askRebirth)
 
 }

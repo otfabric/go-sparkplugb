@@ -18,6 +18,9 @@ var (
 	// ErrDuplicateID is returned by PublishBirth and PublishDeviceBirth when an
 	// alias is used twice in one birth or by another part of the edge node.
 	ErrDuplicateID = errors.New("sparkplugb: duplicate device or alias ID")
+	// ErrAlreadyConnected is returned by Connect when the node is connecting
+	// or connected: a node has one connection at a time. Disconnect it first.
+	ErrAlreadyConnected = errors.New("sparkplugb: already connected")
 	// ErrInvalidState is not returned by this package.
 	//
 	// Deprecated: operations in the wrong state return ErrNotConnected, ErrNoBirth
@@ -37,6 +40,8 @@ type BdSeqStore interface {
 }
 ```
 
+BdSeqStore keeps the bdSeq of the node between runs. Connect calls it with the node's lock held, so it must not call the node. A Load or Store that panics fails Connect; one that ends its goroutine with runtime.Goexit (testing.T.FailNow, for example) ends the Connect with it, and leaves the node Disconnected.
+
 ### type CommandHandler
 
 ```go
@@ -44,6 +49,8 @@ type CommandHandler func(deviceID string, metrics []*pb.Payload_Metric)
 ```
 
 CommandHandler is called with the metrics of an NCMD (deviceID "") or a DCMD, on the transport's goroutine and without a lock of the node held, so it may call the node; the next message waits until it returns, so it should not block. The metrics are the handler's. A handler that does not return normally is logged with its stack, and the node goes on.
+
+An NCMD that sets "Node Control/Rebirth" to true, by name or by the alias the node's birth gave it, starts a rebirth (see Rebirth); its other metrics, if any, go to OnNodeCmd without that one. A DCMD is passed on with the device ID of its topic as it is, whether or not the node published a DBIRTH for that device: the handler checks the ID.
 
 ### type Config
 
@@ -119,8 +126,8 @@ type Node struct {
 
 	// Server walking
 
-	// hostOnlineTS is the timestamp of the latest online STATE of the
-	// primary host: an offline STATE older than it is ignored.
+	// hostOnlineTS is the timestamp of the last online STATE of the primary
+	// host received: an offline STATE older than it is ignored.
 
 	// seqMu keeps the messages of a session in sequence on the wire: it is
 	// held from taking a seq until the message is published, and by Rebirth
@@ -162,6 +169,8 @@ Close disconnects the node, as Disconnect does, and closes it: Connect then retu
 ```go
 func (n *Node) Connect(ctx context.Context) error
 ```
+
+Connect connects the node to its broker, or to the current server of ServerURLs. It returns ErrAlreadyConnected, and leaves the connection as it is, while the node is connecting or connected: a node has one connection at a time.
 
 #### func (Node) Disconnect
 
@@ -210,6 +219,8 @@ func (n *Node) Rebirth(ctx context.Context) error
 ```
 
 Rebirth re-publishes the full birth sequence: NBIRTH followed by DBIRTH for each online device, in the order the devices were first born. It resets the sequence counter per the spec. Messages published meanwhile wait for it, and follow the births with the seq of the new session. The NBIRTH is stamped in a later millisecond than the message before it, unless the clock went back.
+
+Rebirth repeats the births of the current connection only: it returns ErrNoBirth, and publishes nothing, until the program has published the NBIRTH of the connection with PublishBirth, and a device is online when its DBIRTH was published on this connection and no DDEATH since. A rebirth that an NCMD asks for before the program's NBIRTH is not made.
 
 #### func (Node) ResolveAlias
 

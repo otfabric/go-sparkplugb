@@ -35,8 +35,13 @@ func (f *Failure) Error() string {
 }
 
 // Try calls f, the application's code that callback names, and returns nil,
-// or the Failure when f does not return normally. It does not log: a caller
-// that holds a lock gives the Failure to Report once it has released it.
+// or the Failure when f panics. It does not log: a caller that holds a lock
+// gives the Failure to Report once it has released it.
+//
+// A call of runtime.Goexit in f (testing.T.FailNow, for example) cannot be
+// stopped: the goroutine ends, and a lock its caller holds and releases
+// without defer stays held unless the caller releases it in a deferred call
+// of its own. Try logs nothing then.
 func Try(callback string, f func()) (fail *Failure) {
 	defer func() {
 		if r := recover(); r != nil {

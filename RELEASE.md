@@ -1,5 +1,53 @@
 # go-sparkplugb Releases
 
+## v0.6.0
+
+**Date:** 2026-11-15
+**Previous release:** v0.5.0
+
+Session and connection fixes for `edge`, bounded handling of taken-back and held messages in `host` and `app`, and decode limits for every array datatype. Adds `edge.ErrAlreadyConnected`; nothing is removed or changed in the API.
+
+### Breaking
+
+- **`edge`: `Node.Connect` returns `ErrAlreadyConnected` while the node is connecting or connected,** and leaves the connection as it is; before, it opened a second connection. Call `Disconnect` before connecting again.
+- **`edge`: `Rebirth` before the program's `PublishBirth` on the current connection returns `ErrNoBirth` and publishes nothing,** and a rebirth an NCMD asks for then is not made (logged at info level). After `Disconnect` or a lost connection every device is offline until `PublishDeviceBirth` is called for it again, and a rebirth no longer repeats DBIRTHs of an earlier connection. Publish the NBIRTH, and the DBIRTHs of the devices, on each connection, from `OnState` when the state becomes `Online`, as examples/server-walking does.
+- **`payload`: `GetValue` returns `ErrArrayTooLarge` for an array of any array datatype above `MaxArrayElements` (1 << 20) elements,** not only BooleanArray and StringArray: an Int8Array or UInt8Array above 1 MiB of bytes, Int16Array and UInt16Array above 2 MiB, Int32Array, UInt32Array and FloatArray above 4 MiB, Int64Array, UInt64Array, DoubleArray and DateTimeArray above 8 MiB. **`GetPropertyValue` and `GetTemplateParameterValue` return `ErrStringTooLarge` for a string above `MaxStringBytes` (16 MiB).** A caller that needs larger values decodes `bytes_value` or `string_value` itself.
+- **`edge`: the last online STATE of the primary host received decides whether an offline STATE starts a walk to another server,** not the highest timestamp seen: after a host clock set back, an offline STATE stamped after the last online STATE starts the walk, even when an earlier online STATE carried a later timestamp. No change is needed for a host that stamps its STATEs from a clock that does not go back.
+- **`host`, `app`: an NDEATH of an edge node that was never born calls neither `OnNodeDeath` nor `Metrics.OnNodeDeath`.** Code that counted those deaths gets none. **Log entries quote the group, edge node and device IDs** (`NBIRTH from "g1/n1"`, Go syntax): a log parser that matches the unquoted form needs a change.
+
+### Added
+
+- **`edge.ErrAlreadyConnected`,** returned by `Connect` as above.
+
+### Fixed
+
+- **`payload`: the birth check of a template instance works in proportion to the instance,** also when its definition names a member more than once (Sparkplug gives member names no uniqueness rule; such a definition is accepted).
+- **`payload`: `TemplateDefs.Check` reuses the member and parameter names `NewTemplateDefs` indexed,** instead of building them again for each message. A definition changed afterwards with more or fewer members or parameters has its names built again.
+- **`payload`: the error texts of nested templates name each member with a path of its own,** where sibling members could share one.
+- **`host`, `app`: the messages an NBIRTH takes back from the session that ended are held within the per-node, total-count and byte bounds** of the held messages; a message above 8 MiB is not kept for that, and an NDEATH clears what is kept for the node.
+- **`host`, `app`: a DBIRTH applied after its edge node's NDEATH leaves the device stale.**
+- **`host`, `app`: `Metrics.OnMessage` is called for each received message whose topic parses,** STATE included, before the payload is decoded.
+- **`host`, `app`: held messages are dropped 30 s after they arrived (at most 30 s + 1 s) also when no further message arrives;** making room for a message drops the oldest held messages in one pass.
+- **`mqtt`: `PahoTransport.Connect` ends a live connection before it opens the next one,** with a DISCONNECT and without calling that connection's `OnConnectionLost`, so `Disconnect` and `Close` leave no connection up.
+- **`edge`: a walk to another server ends when the `StateHandler` has connected the node again.**
+- **`edge`: an NCMD that requests a rebirth still delivers its other metrics to `OnNodeCmd`,** and a rebirth requested by the alias the node's NBIRTH gave `Node Control/Rebirth` is recognised.
+- **`edge`: a message not handed to the transport, for a context that has already ended, no longer takes a `seq`.** A message the transport returned an error for keeps its `seq`, since it may have gone out.
+- **`edge`: a `BdSeqStore` that ends its goroutine with `runtime.Goexit` leaves the node `Disconnected`** instead of holding its lock.
+- **`ExponentialBackoff.Delay` stays at `Max` for very large `Initial` or `Max` values,** where the doubling could pass the largest `time.Duration`.
+
+### Documentation
+
+- API.md: one connection per edge node, `Rebirth` and the births of the current connection, which messages take a `seq`, NCMD rebirth by alias, unbirthed device IDs in `OnDeviceCmd`, `runtime.Goexit` in callbacks, NDEATH of a node never born, `PahoTransport.Connect` on a live connection.
+- ERRORS.md, SECURITY.md: `edge.ErrAlreadyConnected`, `ErrNoBirth` from `Rebirth`, the decode limits for every array datatype and for property and parameter strings, the held and taken-back messages. ARCHITECTURE.md, OBSERVABILITY.md, INTEROPERABILITY.md and docs/CONFORMANCE.md for the changes above; docs/api regenerated.
+
+### Tests
+
+- `payload`: `TestDecodeLimits` for every array datatype at and past the limit; `TestDecodeLimitsPropertyAndParameterStrings`; `TestTemplateBirthCheckFollowsInstance`, `TestTemplateCheckAllocsIndependentOfDefinition`, `TestTemplateCheckDefinitionChanged`, `TestTemplateDeeperCopiesPath`.
+- `host` and `app`: taken-back messages within the held bounds, NDEATH forgetting them, held messages dropped without traffic, one large message dropping many held ones, DBIRTH after NDEATH, `OnMessage` and deaths of nodes never born, quoted IDs in the log.
+- `edge`: `Connect` when connected, `Rebirth` before the birth of the connection, the walk ending when the node connected meanwhile, an online STATE stamped ahead, NCMD with a rebirth and other metrics, the `seq` of an unpublished message, a `BdSeqStore` that ends its goroutine. `mqtt`: `Connect` replacing a connection. `ExponentialBackoff` with delays near the largest `time.Duration`.
+
+---
+
 ## v0.5.0
 
 **Date:** 2026-11-15

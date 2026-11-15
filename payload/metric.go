@@ -17,14 +17,16 @@ var (
 	ErrUnknownType   = errors.New("sparkplugb: unknown datatype")
 	ErrNilMetric     = errors.New("sparkplugb: nil metric")
 	ErrArrayTooLarge = errors.New("sparkplugb: array exceeds maximum size")
-	// ErrStringTooLarge is returned by GetValue for a string above MaxStringBytes.
+	// ErrStringTooLarge is returned by GetValue, GetPropertyValue and
+	// GetTemplateParameterValue for a string above MaxStringBytes.
 	ErrStringTooLarge = errors.New("sparkplugb: string exceeds maximum size")
 )
 
 const (
-	// MaxArrayElements bounds the elements of a decoded BooleanArray or StringArray.
+	// MaxArrayElements bounds the elements of an array returned by GetValue.
 	MaxArrayElements = 1 << 20 // 1M elements
-	// MaxStringBytes bounds a string returned by GetValue, scalar or array element.
+	// MaxStringBytes bounds a string returned by GetValue, scalar or array
+	// element, GetPropertyValue or GetTemplateParameterValue.
 	MaxStringBytes = 1 << 24 // 16 MiB
 )
 
@@ -78,7 +80,9 @@ const (
 //
 // A value carried in another field than its datatype's, a string in a Float
 // metric for one, returns ErrTypeMismatch, as does an integer out of the
-// datatype's range. The []byte of Bytes and File, the DataSet and the
+// datatype's range. A string above MaxStringBytes returns ErrStringTooLarge,
+// and an array of more than MaxArrayElements elements ErrArrayTooLarge. The
+// []byte of Bytes and File, the DataSet and the
 // Template are the metric's own: they change with it. Arrays are decoded
 // into new slices.
 func GetValue(m *pb.Payload_Metric) (any, error) {
@@ -163,6 +167,9 @@ func GetValue(m *pb.Payload_Metric) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if size := fixedWidth(dt); size > 0 && len(b)/size > MaxArrayElements {
+		return nil, ErrArrayTooLarge
+	}
 	switch dt {
 	case pb.DataType_Int8Array:
 		return decodeInt8Array(b)
@@ -193,6 +200,22 @@ func GetValue(m *pb.Payload_Metric) (any, error) {
 	default: // DateTimeArray
 		return decodeDateTimeArray(b)
 	}
+}
+
+// fixedWidth returns the bytes of an element of a fixed-width array
+// datatype, and 0 for BooleanArray, StringArray and the other datatypes.
+func fixedWidth(dt pb.DataType) int {
+	switch dt {
+	case pb.DataType_Int8Array, pb.DataType_UInt8Array:
+		return 1
+	case pb.DataType_Int16Array, pb.DataType_UInt16Array:
+		return 2
+	case pb.DataType_Int32Array, pb.DataType_UInt32Array, pb.DataType_FloatArray:
+		return 4
+	case pb.DataType_Int64Array, pb.DataType_UInt64Array, pb.DataType_DoubleArray, pb.DataType_DateTimeArray:
+		return 8
+	}
+	return 0
 }
 
 // isArrayType reports whether dt is one of the array datatypes, which are

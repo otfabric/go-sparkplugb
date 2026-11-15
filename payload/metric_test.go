@@ -488,6 +488,9 @@ func TestDecodeLimits(t *testing.T) {
 	arrMetric := func(b []byte) *pb.Payload_Metric {
 		return &pb.Payload_Metric{Datatype: proto.Uint32(uint32(pb.DataType_StringArray)), Value: &pb.Payload_Metric_BytesValue{BytesValue: b}}
 	}
+	fixedMetric := func(dt pb.DataType, size, n int) *pb.Payload_Metric {
+		return &pb.Payload_Metric{Datatype: proto.Uint32(uint32(dt)), Value: &pb.Payload_Metric_BytesValue{BytesValue: make([]byte, size*n)}}
+	}
 	tests := []struct {
 		name string
 		m    *pb.Payload_Metric
@@ -502,6 +505,19 @@ func TestDecodeLimits(t *testing.T) {
 		{"last array element, unterminated", arrMetric([]byte("a\x00" + long)), ErrStringTooLarge},
 		{"array at the element limit", arrMetric(make([]byte, MaxArrayElements)), nil},
 		{"array elements", arrMetric(make([]byte, MaxArrayElements+1)), ErrArrayTooLarge},
+		{"Int8Array at the element limit", fixedMetric(pb.DataType_Int8Array, 1, MaxArrayElements), nil},
+		{"Int8Array elements", fixedMetric(pb.DataType_Int8Array, 1, MaxArrayElements+1), ErrArrayTooLarge},
+		{"UInt8Array elements", fixedMetric(pb.DataType_UInt8Array, 1, MaxArrayElements+1), ErrArrayTooLarge},
+		{"Int16Array elements", fixedMetric(pb.DataType_Int16Array, 2, MaxArrayElements+1), ErrArrayTooLarge},
+		{"UInt16Array elements", fixedMetric(pb.DataType_UInt16Array, 2, MaxArrayElements+1), ErrArrayTooLarge},
+		{"Int32Array elements", fixedMetric(pb.DataType_Int32Array, 4, MaxArrayElements+1), ErrArrayTooLarge},
+		{"UInt32Array elements", fixedMetric(pb.DataType_UInt32Array, 4, MaxArrayElements+1), ErrArrayTooLarge},
+		{"FloatArray elements", fixedMetric(pb.DataType_FloatArray, 4, MaxArrayElements+1), ErrArrayTooLarge},
+		{"Int64Array elements", fixedMetric(pb.DataType_Int64Array, 8, MaxArrayElements+1), ErrArrayTooLarge},
+		{"UInt64Array elements", fixedMetric(pb.DataType_UInt64Array, 8, MaxArrayElements+1), ErrArrayTooLarge},
+		{"DoubleArray elements", fixedMetric(pb.DataType_DoubleArray, 8, MaxArrayElements+1), ErrArrayTooLarge},
+		{"DateTimeArray at the element limit", fixedMetric(pb.DataType_DateTimeArray, 8, MaxArrayElements), nil},
+		{"DateTimeArray elements", fixedMetric(pb.DataType_DateTimeArray, 8, MaxArrayElements+1), ErrArrayTooLarge},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -509,5 +525,27 @@ func TestDecodeLimits(t *testing.T) {
 				t.Fatalf("err %v, want %v", err, tt.want)
 			}
 		})
+	}
+}
+
+// GetPropertyValue and GetTemplateParameterValue hold strings to
+// MaxStringBytes, as GetValue does.
+func TestDecodeLimitsPropertyAndParameterStrings(t *testing.T) {
+	long := strings.Repeat("x", MaxStringBytes+1)
+	limit := strings.Repeat("x", MaxStringBytes)
+	for _, dt := range []pb.DataType{pb.DataType_String, pb.DataType_Text} {
+		for _, tc := range []struct {
+			s    string
+			want error
+		}{{limit, nil}, {long, ErrStringTooLarge}} {
+			prop := &pb.Payload_PropertyValue{Type: proto.Uint32(uint32(dt)), Value: &pb.Payload_PropertyValue_StringValue{StringValue: tc.s}}
+			if _, err := GetPropertyValue(prop); !errors.Is(err, tc.want) {
+				t.Errorf("%v property of %d bytes: err %v, want %v", dt, len(tc.s), err, tc.want)
+			}
+			param := &pb.Payload_Template_Parameter{Type: proto.Uint32(uint32(dt)), Value: &pb.Payload_Template_Parameter_StringValue{StringValue: tc.s}}
+			if _, err := GetTemplateParameterValue(param); !errors.Is(err, tc.want) {
+				t.Errorf("%v parameter of %d bytes: err %v, want %v", dt, len(tc.s), err, tc.want)
+			}
+		}
 	}
 }
