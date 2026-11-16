@@ -12,6 +12,10 @@ Package edge implements a Sparkplug B Edge Node: the NBIRTH/NDEATH and DBIRTH/DD
 
 ```go
 var (
+	// ErrClosed is returned by Connect on a node that Close was called on,
+	// and by a Connect that Close overtook. After Close the publishes and
+	// Rebirth return an error that matches ErrClosed, and ErrNotConnected or
+	// ErrNoBirth as they do on an open node that is not online or not born.
 	ErrClosed       = errors.New("sparkplugb: closed")
 	ErrNotConnected = errors.New("sparkplugb: not connected")
 	ErrNoBirth      = errors.New("sparkplugb: birth not published")
@@ -117,6 +121,11 @@ type Node struct {
 
 	// connection generation; prevents stale callbacks
 
+	// life ends when Close is called (stop): the goroutines of the node wait
+	// on it, so that Close ends what they wait for, and owned has them, so
+	// that Close waits for them: the rebirth an NCMD asks for, and the walk
+	// to another server.
+
 	// state transitions not yet delivered (notify)
 
 	// Birth state for auto-rebirth
@@ -162,7 +171,11 @@ func (n *Node) BdSeq() uint64
 func (n *Node) Close(ctx context.Context) error
 ```
 
-Close disconnects the node, as Disconnect does, and closes it: Connect then returns ErrClosed, and a Connect in progress, a walk to another server included, ends with ErrClosed and leaves no connection up. Close is safe to call more than once and from several goroutines: the first call closes the node, the others return nil at once.
+Close disconnects the node, as Disconnect does, and closes it: Connect then returns ErrClosed, and a Connect in progress, a walk to another server included, ends with ErrClosed and leaves no connection up. The other operations return an error that matches ErrClosed, and ErrNotConnected or ErrNoBirth; Disconnect returns nil.
+
+Close returns once the goroutines the node started have ended: a rebirth an NCMD asked for, whose publishes end with Close, and a walk to another server, which publishes its NDEATH first. Called from a callback that such a goroutine runs (OnState during a walk), Close does not wait for that one, which ends after the callback. A callback the transport is running when Close is called (OnNodeCmd, OnDeviceCmd) may finish after Close has returned.
+
+Close is safe to call more than once and from several goroutines: the first call closes the node, the others return nil at once.
 
 #### func (Node) Connect
 

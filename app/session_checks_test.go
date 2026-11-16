@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	sparkplugb "github.com/otfabric/go-sparkplugb"
@@ -41,10 +42,12 @@ func withChecks(c sparkplugb.SessionChecks) func(*Config) {
 	return func(cfg *Config) { cfg.SessionChecks = c }
 }
 
-// noRebirth fails when a rebirth is requested within a few sessionWaits.
+// noRebirth fails when a rebirth is requested within a few sessionWaits. It
+// is called in a synctest bubble, whose clock it moves on.
 func noRebirth(t *testing.T, a *Application, tr *mockTransport, before int) {
 	t.Helper()
 	time.Sleep(5 * a.sessionWait)
+	synctest.Wait()
 	if n := rebirths(tr); n != before {
 		t.Errorf("%d rebirths requested, want none", n-before)
 	}
@@ -72,59 +75,63 @@ func (m *dropMetrics) get() []string {
 // the NBIRTH's millisecond, held before the NBIRTH, is dropped, and the new
 // session goes on in sequence without a rebirth.
 func TestApplicationCheckBirthMillisecondDropsHeld(t *testing.T) {
-	dm := &dropMetrics{}
-	a, tr := checkedApp(t, func(c *Config) {
-		c.SessionChecks = sparkplugb.CheckBirthMillisecond
-		c.Metrics = dm
+	synctest.Test(t, func(t *testing.T) {
+		dm := &dropMetrics{}
+		a, tr := checkedApp(t, func(c *Config) {
+			c.SessionChecks = sparkplugb.CheckBirthMillisecond
+			c.Metrics = dm
+		})
+		var got deviceValues
+		a.cfg.OnDeviceData = got.record
+
+		tr.deliver(sessTopic(topic.DDATA, "d1"), sessMsg(49, 500, sessInt(t, "v", 304))) // ending session
+		waitFor(t, func() bool { return rebirths(tr) == 1 })                             // a DDATA before its NBIRTH
+		tr.deliver(sessTopic(topic.NBIRTH, ""), sessMsg(0, 500, payload.BdSeqMetric(0)))
+		tr.deliver(sessTopic(topic.DBIRTH, "d1"), sessMsg(1, 500, sessInt(t, "v", 0)))
+		before := rebirths(tr)
+		for s := uint64(2); s <= 49; s++ {
+			tr.deliver(sessTopic(topic.DDATA, "d1"), sessMsg(s, 500+s, sessInt(t, "v", int32(1000+s))))
+		}
+
+		if got.has(304) || !got.has(1049) {
+			t.Fatalf("values %v: want 1049 delivered and not 304", got.v)
+		}
+		if ns := a.GetNode("g1", "n1"); ns.LastSeq != 49 {
+			t.Errorf("LastSeq = %d, want 49", ns.LastSeq)
+		}
+		noRebirth(t, a, tr, before)
+		if d := dm.get(); len(d) != 1 || d[0] != "g1/n1/DDATA" {
+			t.Errorf("OnSessionDrop calls %v, want one for g1/n1/DDATA", d)
+		}
 	})
-	var got deviceValues
-	a.cfg.OnDeviceData = got.record
-
-	tr.deliver(sessTopic(topic.DDATA, "d1"), sessMsg(49, 500, sessInt(t, "v", 304))) // ending session
-	waitFor(t, func() bool { return rebirths(tr) == 1 })                             // a DDATA before its NBIRTH
-	tr.deliver(sessTopic(topic.NBIRTH, ""), sessMsg(0, 500, payload.BdSeqMetric(0)))
-	tr.deliver(sessTopic(topic.DBIRTH, "d1"), sessMsg(1, 500, sessInt(t, "v", 0)))
-	before := rebirths(tr)
-	for s := uint64(2); s <= 49; s++ {
-		tr.deliver(sessTopic(topic.DDATA, "d1"), sessMsg(s, 500+s, sessInt(t, "v", int32(1000+s))))
-	}
-
-	if got.has(304) || !got.has(1049) {
-		t.Fatalf("values %v: want 1049 delivered and not 304", got.v)
-	}
-	if ns := a.GetNode("g1", "n1"); ns.LastSeq != 49 {
-		t.Errorf("LastSeq = %d, want 49", ns.LastSeq)
-	}
-	noRebirth(t, a, tr, before)
-	if d := dm.get(); len(d) != 1 || d[0] != "g1/n1/DDATA" {
-		t.Errorf("OnSessionDrop calls %v, want one for g1/n1/DDATA", d)
-	}
 }
 
 // With CheckBirthMillisecond, a DDATA of the ending session in the next
 // NBIRTH's millisecond, applied to the ending session in sequence before that
 // NBIRTH, is not taken back for the new session.
 func TestApplicationCheckBirthMillisecondKeepsAppliedInEndedSession(t *testing.T) {
-	a, tr := checkedApp(t, withChecks(sparkplugb.CheckBirthMillisecond))
-	var got deviceValues
-	a.cfg.OnDeviceData = got.record
+	synctest.Test(t, func(t *testing.T) {
+		a, tr := checkedApp(t, withChecks(sparkplugb.CheckBirthMillisecond))
+		var got deviceValues
+		a.cfg.OnDeviceData = got.record
 
-	tr.deliver(sessTopic(topic.NBIRTH, ""), sessMsg(0, 100, payload.BdSeqMetric(0)))
-	tr.deliver(sessTopic(topic.DBIRTH, "d1"), sessMsg(1, 100, sessInt(t, "v", 0)))
-	tr.deliver(sessTopic(topic.DDATA, "d1"), sessMsg(2, 500, sessInt(t, "v", 7))) // ending session, in sequence
+		tr.deliver(sessTopic(topic.NBIRTH, ""), sessMsg(0, 100, payload.BdSeqMetric(0)))
+		tr.deliver(sessTopic(topic.DBIRTH, "d1"), sessMsg(1, 100, sessInt(t, "v", 0)))
+		tr.deliver(sessTopic(topic.DDATA, "d1"), sessMsg(2, 500, sessInt(t, "v", 7))) // ending session, in sequence
 
-	tr.deliver(sessTopic(topic.NBIRTH, ""), sessMsg(0, 500, payload.BdSeqMetric(0)))
-	tr.deliver(sessTopic(topic.DBIRTH, "d1"), sessMsg(1, 500, sessInt(t, "v", 7)))
-	before := rebirths(tr)
-	tr.deliver(sessTopic(topic.DDATA, "d1"), sessMsg(2, 501, sessInt(t, "v", 8)))
+		tr.deliver(sessTopic(topic.NBIRTH, ""), sessMsg(0, 500, payload.BdSeqMetric(0)))
+		tr.deliver(sessTopic(topic.DBIRTH, "d1"), sessMsg(1, 500, sessInt(t, "v", 7)))
+		before := rebirths(tr)
+		tr.deliver(sessTopic(topic.DDATA, "d1"), sessMsg(2, 501, sessInt(t, "v", 8)))
 
-	if !got.has(8) {
-		t.Fatalf("values %v: the new session's 8 not delivered", got.v)
-	}
-	if v := sessValue(t, a.GetNode("g1", "n1").Devices["d1"].Metrics, "v"); v != int32(8) {
-		t.Errorf("v = %v, want 8", v)
-	}
-	noRebirth(t, a, tr, before)
+		if !got.has(8) {
+			t.Fatalf("values %v: the new session's 8 not delivered", got.v)
+		}
+		if v := sessValue(t, a.GetNode("g1", "n1").Devices["d1"].Metrics, "v"); v != int32(8) {
+			t.Errorf("v = %v, want 8", v)
+		}
+		noRebirth(t, a, tr, before)
+	})
 }
 
 // Without the check, the same sequence takes the applied DDATA back for the
@@ -151,29 +158,31 @@ func TestApplicationDefaultTakesBackAppliedInBirthMillisecond(t *testing.T) {
 // arrives in sequence after the NBIRTH is dropped, and the new session's
 // message with that seq is applied, without a rebirth.
 func TestApplicationCheckOlderInSequenceDropsEndedSession(t *testing.T) {
-	dm := &dropMetrics{}
-	a, tr := checkedApp(t, func(c *Config) {
-		c.SessionChecks = sparkplugb.CheckOlderInSequence
-		c.Metrics = dm
+	synctest.Test(t, func(t *testing.T) {
+		dm := &dropMetrics{}
+		a, tr := checkedApp(t, func(c *Config) {
+			c.SessionChecks = sparkplugb.CheckOlderInSequence
+			c.Metrics = dm
+		})
+		var got deviceValues
+		a.cfg.OnDeviceData = got.record
+
+		tr.deliver(sessTopic(topic.NBIRTH, ""), sessMsg(0, 100, payload.BdSeqMetric(0)))
+		tr.deliver(sessTopic(topic.DBIRTH, "d1"), sessMsg(1, 100, sessInt(t, "v", 0)))
+		tr.deliver(sessTopic(topic.NBIRTH, ""), sessMsg(0, 1000, payload.BdSeqMetric(0)))
+		tr.deliver(sessTopic(topic.DBIRTH, "d1"), sessMsg(1, 1000, sessInt(t, "v", 0)))
+		before := rebirths(tr)
+		tr.deliver(sessTopic(topic.DDATA, "d1"), sessMsg(2, 999, sessInt(t, "v", 7)))  // ending session
+		tr.deliver(sessTopic(topic.DDATA, "d1"), sessMsg(2, 1000, sessInt(t, "v", 8))) // this session
+
+		if got.has(7) || !got.has(8) {
+			t.Fatalf("values %v: want 8 delivered and not 7", got.v)
+		}
+		noRebirth(t, a, tr, before)
+		if d := dm.get(); len(d) != 1 || d[0] != "g1/n1/DDATA" {
+			t.Errorf("OnSessionDrop calls %v, want one for g1/n1/DDATA", d)
+		}
 	})
-	var got deviceValues
-	a.cfg.OnDeviceData = got.record
-
-	tr.deliver(sessTopic(topic.NBIRTH, ""), sessMsg(0, 100, payload.BdSeqMetric(0)))
-	tr.deliver(sessTopic(topic.DBIRTH, "d1"), sessMsg(1, 100, sessInt(t, "v", 0)))
-	tr.deliver(sessTopic(topic.NBIRTH, ""), sessMsg(0, 1000, payload.BdSeqMetric(0)))
-	tr.deliver(sessTopic(topic.DBIRTH, "d1"), sessMsg(1, 1000, sessInt(t, "v", 0)))
-	before := rebirths(tr)
-	tr.deliver(sessTopic(topic.DDATA, "d1"), sessMsg(2, 999, sessInt(t, "v", 7)))  // ending session
-	tr.deliver(sessTopic(topic.DDATA, "d1"), sessMsg(2, 1000, sessInt(t, "v", 8))) // this session
-
-	if got.has(7) || !got.has(8) {
-		t.Fatalf("values %v: want 8 delivered and not 7", got.v)
-	}
-	noRebirth(t, a, tr, before)
-	if d := dm.get(); len(d) != 1 || d[0] != "g1/n1/DDATA" {
-		t.Errorf("OnSessionDrop calls %v, want one for g1/n1/DDATA", d)
-	}
 }
 
 // The checks drop data only: a DBIRTH stamped before its NBIRTH, and a DBIRTH

@@ -1,5 +1,42 @@
 # go-sparkplugb Releases
 
+## v0.7.0
+
+**Date:** 2026-11-16
+**Previous release:** v0.6.0
+
+`Close` of `edge`, `host` and `app` now ends and waits for the goroutines and timers its runtime started, and operations once `Close` was called return errors that match `ErrClosed`. Adds `sparkplugb.HeldDropMetrics`; nothing is removed or changed in the API.
+
+### Breaking
+
+- **`edge`, `host`, `app`: `Close` returns once the goroutines and timers the runtime started have ended,** as the Close contract of otfabric/engineering asks: the edge node's rebirth that an NCMD asked for and its walk to another server, the rebirth requests of `host` and `app`, their waits for an NBIRTH, the reorder wait of `host` and the sweep of the held messages. `Close` ends them first: their publishes and connects end with it, and a rebirth request not yet sent is not sent. The NDEATH that a walk publishes as it leaves a server goes on, within 10 s. Who notices: a program whose `Close` returned while those went on now waits for them, for as long as the transport takes to return from a publish whose context has ended; before, an edge node's `Close` during a rebirth waiting for the broker took up to the rebirth's own 10 s. A program whose callbacks on those goroutines (`OnState`, `RetryPolicy.ShouldRetry` or `Metrics.OnConnect` during a walk) wait for a lock that the caller of `Close` holds now waits in `Close` for ever. `Close` from such a callback does not wait for the goroutine it is called on. To keep `Close` from waiting, call it on a goroutine of its own (`go node.Close(ctx)`); otherwise release such a lock before `Close`. There is no option for the old behaviour.
+- **`edge`, `host`, `app`: an operation called once `Close` was called returns an error that matches `ErrClosed`,** as well as the `ErrNotConnected` or `ErrNoBirth` it returned before: the edge node's publishes and `Rebirth`, and `SendNodeCommand`, `SendDeviceCommand` and `RequestRebirth` of `host` and `app`. This holds from the moment `Close` is called, also while it disconnects. Who notices: code that compares the error with `==` or matches its text; `errors.Is(err, ErrNotConnected)` and `errors.Is(err, ErrNoBirth)` match as before, so test with `errors.Is`.
+
+### Added
+
+- **`sparkplugb.HeldDropMetrics`:** a `host` or `app` `Metrics` that implements `OnHeldDrop(groupID, edgeNodeID, messageType)` is told of each message dropped from those held for reordering to keep them within 4096 messages and 8 MiB over all edge nodes, with its edge node and message type, with no lock of the runtime held. A held message that waited 30 s for the gap before it is dropped without this call. `Metrics` itself is unchanged; each drop is still logged at debug level.
+
+### Fixed
+
+- **`host`, `app`: `Close` stops the timers armed after the connection was lost.** A message handled once the connection was lost could arm the reorder wait (`host`) or the wait for an NBIRTH; `Close` then returned without stopping it, since the runtime was already `Disconnected`, and the timer requested a rebirth after `Close` had returned.
+
+### Documentation
+
+- API.md: what `Close` waits for and ends, the errors once `Close` was called, `HeldDropMetrics` and its row in the Callbacks table. ERRORS.md, OBSERVABILITY.md, SECURITY.md and ARCHITECTURE.md ("Goroutines") for the changes above; docs/api regenerated.
+- TESTING.md: the lifecycle matrix rows L2 (`PahoTransport`), L3, L4, L10, L11 and L16 filled in, the paragraph on `Close`, `testing/synctest` for the tests that waited on the wall clock, the 32-bit run in the CI table and its tier.
+
+### Tests
+
+- `edge`: operations during and after `Close`, `Close` ending a rebirth that waits for the broker, `Close` from `OnState`, `Metrics.OnConnect` and `RetryPolicy` during a walk, `Close` while a command callback runs, a slow command callback; `TestCloseDuringWalk` asserts that `Close` returns once the walk has ended.
+- `host` and `app`: commands during and after `Close`, `Close` ending the rebirth requests on their way, the timers armed after a lost connection, `Close` while a command waits for the transport, `Close` while a callback runs, a slow callback, `HeldDropMetrics` for edge nodes without an NBIRTH and for messages an NBIRTH takes back. `mqtt`: two concurrent `Disconnect` calls on `PahoTransport`. `internal/routine`: the group `Close` waits for.
+- The tests that slept to let goroutines finish or time pass run in a `testing/synctest` bubble: the reorder timeout, the throttling of rebirth requests, the session waits and checks, the NDEATH memory, the convergence on reordered sessions (one bubble per seed), the edge node's stale offline STATE.
+
+### CI
+
+- `check-spec.yaml` (weekly and on dispatch) runs the tests on a 32-bit architecture, `GOARCH=386 go test -count=1 ./...`, in the job `test-386` with `contents: read`. Pull requests do not run it.
+
+---
+
 ## v0.6.0
 
 **Date:** 2026-11-15

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/otfabric/go-sparkplugb/mqtt"
@@ -417,107 +418,113 @@ func TestApplicationDeviceData(t *testing.T) {
 }
 
 func TestApplicationSeqGapRequestsRebirth(t *testing.T) {
-	mt := newMockTransport()
-	a, _ := New(mt, Config{BrokerURL: "tcp://localhost:1883"})
+	synctest.Test(t, func(t *testing.T) {
+		mt := newMockTransport()
+		a, _ := New(mt, Config{BrokerURL: "tcp://localhost:1883"})
 
-	ctx := context.Background()
-	a.Connect(ctx)
-	defer a.Close(ctx)
+		ctx := context.Background()
+		a.Connect(ctx)
+		defer a.Close(ctx)
 
-	mt.deliver("spBv1.0/plant/NBIRTH/gw1", encodeBirth(0, 1))
-	mt.deliver("spBv1.0/plant/NDATA/gw1", encodeData(5))
+		mt.deliver("spBv1.0/plant/NBIRTH/gw1", encodeBirth(0, 1))
+		mt.deliver("spBv1.0/plant/NDATA/gw1", encodeData(5))
 
-	time.Sleep(200 * time.Millisecond)
+		synctest.Wait() // the rebirth request
 
-	pubs := mt.getPublished()
-	found := false
-	for _, p := range pubs {
-		if p.Topic == "spBv1.0/plant/NCMD/gw1" {
-			decoded, err := payload.Decode(p.Payload)
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, m := range decoded.Metrics {
-				if m.GetName() == "Node Control/Rebirth" && m.GetBooleanValue() {
-					found = true
+		pubs := mt.getPublished()
+		found := false
+		for _, p := range pubs {
+			if p.Topic == "spBv1.0/plant/NCMD/gw1" {
+				decoded, err := payload.Decode(p.Payload)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, m := range decoded.Metrics {
+					if m.GetName() == "Node Control/Rebirth" && m.GetBooleanValue() {
+						found = true
+					}
 				}
 			}
 		}
-	}
-	if !found {
-		t.Fatal("expected rebirth request on seq gap")
-	}
+		if !found {
+			t.Fatal("expected rebirth request on seq gap")
+		}
+	})
 }
 
 func TestApplicationThrottlesSeqGapRebirths(t *testing.T) {
-	mt := newMockTransport()
-	a, _ := New(mt, Config{BrokerURL: "tcp://localhost:1883"})
+	synctest.Test(t, func(t *testing.T) {
+		mt := newMockTransport()
+		a, _ := New(mt, Config{BrokerURL: "tcp://localhost:1883"})
 
-	ctx := context.Background()
-	a.Connect(ctx)
-	defer a.Close(ctx)
+		ctx := context.Background()
+		a.Connect(ctx)
+		defer a.Close(ctx)
 
-	mt.deliver("spBv1.0/plant/NBIRTH/gw1", encodeBirth(0, 1))
-	for seq := uint64(5); seq < 10; seq++ {
-		mt.deliver("spBv1.0/plant/NDATA/gw1", encodeData(seq))
-	}
-
-	time.Sleep(200 * time.Millisecond)
-
-	var reqs int
-	for _, p := range mt.getPublished() {
-		if p.Topic == "spBv1.0/plant/NCMD/gw1" {
-			reqs++
-		}
-	}
-	if reqs != 1 {
-		t.Fatalf("%d rebirth requests, want 1", reqs)
-	}
-
-	// The NBIRTH answers the request; the messages throttled while it was
-	// pending may have been of this new session: one more request, then none.
-	for range 2 {
 		mt.deliver("spBv1.0/plant/NBIRTH/gw1", encodeBirth(0, 1))
-	}
-	time.Sleep(200 * time.Millisecond)
-	reqs = 0
-	for _, p := range mt.getPublished() {
-		if p.Topic == "spBv1.0/plant/NCMD/gw1" {
-			reqs++
+		for seq := uint64(5); seq < 10; seq++ {
+			mt.deliver("spBv1.0/plant/NDATA/gw1", encodeData(seq))
 		}
-	}
-	if reqs != 2 {
-		t.Fatalf("%d rebirth requests after the NBIRTH, want 2", reqs)
-	}
+
+		synctest.Wait() // the rebirth requests
+
+		var reqs int
+		for _, p := range mt.getPublished() {
+			if p.Topic == "spBv1.0/plant/NCMD/gw1" {
+				reqs++
+			}
+		}
+		if reqs != 1 {
+			t.Fatalf("%d rebirth requests, want 1", reqs)
+		}
+
+		// The NBIRTH answers the request; the messages throttled while it was
+		// pending may have been of this new session: one more request, then none.
+		for range 2 {
+			mt.deliver("spBv1.0/plant/NBIRTH/gw1", encodeBirth(0, 1))
+		}
+		synctest.Wait()
+		reqs = 0
+		for _, p := range mt.getPublished() {
+			if p.Topic == "spBv1.0/plant/NCMD/gw1" {
+				reqs++
+			}
+		}
+		if reqs != 2 {
+			t.Fatalf("%d rebirth requests after the NBIRTH, want 2", reqs)
+		}
+	})
 }
 
 func TestApplicationAppliesNextSessionDBIRTHBeforeNBIRTH(t *testing.T) {
-	mt := newMockTransport()
-	a, _ := New(mt, Config{BrokerURL: "tcp://localhost:1883"})
+	synctest.Test(t, func(t *testing.T) {
+		mt := newMockTransport()
+		a, _ := New(mt, Config{BrokerURL: "tcp://localhost:1883"})
 
-	ctx := context.Background()
-	a.Connect(ctx)
-	defer a.Close(ctx)
+		ctx := context.Background()
+		a.Connect(ctx)
+		defer a.Close(ctx)
 
-	mt.deliver("spBv1.0/plant/NBIRTH/gw1", sessMsg(0, 1000, payload.BdSeqMetric(1)))
-	for seq := uint64(1); seq <= 5; seq++ {
-		mt.deliver("spBv1.0/plant/NDATA/gw1", sessMsg(seq, 1000))
-	}
-	// The node restarts; the broker delivers the DBIRTH of the new session
-	// (seq 1, behind the current session's 6) before its NBIRTH.
-	mt.deliver("spBv1.0/plant/DBIRTH/gw1/motor1", sessMsg(1, 1000))
-	mt.deliver("spBv1.0/plant/NBIRTH/gw1", sessMsg(0, 1000, payload.BdSeqMetric(2)))
-
-	ns := a.GetNode("plant", "gw1")
-	if ns == nil || ns.BdSeq != 2 || ns.Devices["motor1"] == nil || !ns.Devices["motor1"].Online {
-		t.Fatalf("node %+v: want the new session with device motor1 online", ns)
-	}
-	time.Sleep(100 * time.Millisecond)
-	for _, p := range mt.getPublished() {
-		if p.Topic == "spBv1.0/plant/NCMD/gw1" {
-			t.Fatal("rebirth requested for a message of the next session")
+		mt.deliver("spBv1.0/plant/NBIRTH/gw1", sessMsg(0, 1000, payload.BdSeqMetric(1)))
+		for seq := uint64(1); seq <= 5; seq++ {
+			mt.deliver("spBv1.0/plant/NDATA/gw1", sessMsg(seq, 1000))
 		}
-	}
+		// The node restarts; the broker delivers the DBIRTH of the new session
+		// (seq 1, behind the current session's 6) before its NBIRTH.
+		mt.deliver("spBv1.0/plant/DBIRTH/gw1/motor1", sessMsg(1, 1000))
+		mt.deliver("spBv1.0/plant/NBIRTH/gw1", sessMsg(0, 1000, payload.BdSeqMetric(2)))
+
+		ns := a.GetNode("plant", "gw1")
+		if ns == nil || ns.BdSeq != 2 || ns.Devices["motor1"] == nil || !ns.Devices["motor1"].Online {
+			t.Fatalf("node %+v: want the new session with device motor1 online", ns)
+		}
+		synctest.Wait() // the rebirth requests, were there any
+		for _, p := range mt.getPublished() {
+			if p.Topic == "spBv1.0/plant/NCMD/gw1" {
+				t.Fatal("rebirth requested for a message of the next session")
+			}
+		}
+	})
 }
 
 func TestApplicationAliasResolution(t *testing.T) {

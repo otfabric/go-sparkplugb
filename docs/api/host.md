@@ -12,6 +12,9 @@ Package host implements a Sparkplug B Primary Host Application: it publishes STA
 
 ```go
 var (
+	// ErrClosed is returned by Connect on a host that Close was called on, and
+	// by a Connect that Close overtook. After Close the commands return an
+	// error that matches ErrClosed and ErrNotConnected.
 	ErrClosed       = errors.New("sparkplugb: host closed")
 	ErrNotConnected = errors.New("sparkplugb: host not connected")
 )
@@ -45,6 +48,10 @@ type App struct {
 	// pending sweep of the held messages (armSweep)
 	// rebirth requests being sent (askRebirth)
 
+	// life ends when Close is called (stop): the rebirth requests on their
+	// way are sent with it, so that Close ends them, and owned has them and
+	// the timers, so that Close waits for them.
+
 	// stateMu keeps the STATE messages of a connection in order: Connect
 	// holds it from its last check for Close to the STATE birth, Disconnect
 	// while it publishes the STATE death, so that no birth follows the death.
@@ -65,7 +72,11 @@ func New(transport mqtt.Transport, cfg Config) (*App, error)
 func (a *App) Close(ctx context.Context) error
 ```
 
-Close disconnects the host, as Disconnect does, and closes it: Connect then returns ErrClosed, and a Connect in progress ends with ErrClosed and leaves no connection up. Close is safe to call more than once and from several goroutines: the first call closes the host, the others return nil at once.
+Close disconnects the host, as Disconnect does, and closes it: Connect then returns ErrClosed, and a Connect in progress ends with ErrClosed and leaves no connection up. The commands return an error that matches ErrClosed and ErrNotConnected; Disconnect returns nil.
+
+Close returns once the goroutines the host started have ended: the rebirth requests on their way, which end with Close, and the timers of the host, which it stops. A callback the transport is running when Close is called (OnNodeData, say) may finish after Close has returned.
+
+Close is safe to call more than once and from several goroutines: the first call closes the host, the others return nil at once.
 
 #### func (App) Connect
 

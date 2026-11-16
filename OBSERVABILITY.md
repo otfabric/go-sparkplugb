@@ -29,6 +29,8 @@ Set `Config.Metrics`. Methods are synchronous, called without a lock of the runt
 
 A `host` or `app` `Metrics` that also implements `sparkplugb.SessionDropMetrics` gets `OnSessionDrop(groupID, edgeNodeID, messageType)` for each message dropped as belonging to a session that has ended: out of sequence and older than the NBIRTH, always, and what `Config.SessionChecks` drops ([API.md](API.md#session-checks)). Each drop is also logged at debug level, with the check that made it.
 
+A `host` or `app` `Metrics` that also implements `sparkplugb.HeldDropMetrics` gets `OnHeldDrop(groupID, edgeNodeID, messageType)` for each message dropped from those held for reordering to keep them within their bounds over all edge nodes, 4096 messages and 8 MiB of payload ([SECURITY.md](SECURITY.md)): the oldest held message of any edge node makes room for the next. The message type is NDATA, DDATA, DBIRTH or DDEATH. Each drop is also logged at debug level. A held message that waited 30 s for the gap before it is dropped without this call. Its group and node IDs give it the cardinality of the fleet.
+
 ## State
 
 `Config.OnState` and `State()` give the state of a runtime. `OnState` may call the runtime ([API.md](API.md#callbacks)). `host` and `app` expose the tracked nodes through `GetNode` and `Nodes`, which return copies.
