@@ -5,6 +5,7 @@ package edge
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -95,6 +96,62 @@ func TestOperationsAfterClose(t *testing.T) {
 				t.Errorf("published %d messages after Close was called", len(p))
 			}
 		})
+	}
+}
+
+// errHeldPublish is what heldPublish returns for a publish it held, once
+// the publish's context has ended.
+var errHeldPublish = errors.New("held publish ended")
+
+// heldPublish is the mock transport with its NDATA publish held until its
+// context ends: a publish that waits for the broker.
+type heldPublish struct {
+	*mockTransport
+	arrived chan struct{}
+}
+
+func (h *heldPublish) Publish(ctx context.Context, t string, qos byte, retained bool, p []byte) error {
+	if strings.Contains(t, "/NDATA/") {
+		close(h.arrived)
+		<-ctx.Done()
+		return fmt.Errorf("%w: %w", errHeldPublish, ctx.Err())
+	}
+	return h.mockTransport.Publish(ctx, t, qos, retained, p)
+}
+
+// Close contract 2: a publish on its way to the transport when Close is
+// called ends with Close, with an error that matches ErrClosed as well as
+// the transport's; Close then publishes the NDEATH and returns. Before,
+// Close waited for the publish, which waited for the broker.
+func TestCloseEndsAPublishInFlight(t *testing.T) {
+	tr := &heldPublish{mockTransport: newMockTransport(), arrived: make(chan struct{})}
+	n, err := New(tr, testConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := n.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.PublishBirth(ctx, []*pb.Payload_Metric{intMetric(t, "x", 1)}); err != nil {
+		t.Fatal(err)
+	}
+	published := make(chan error, 1)
+	go func() { published <- n.PublishNodeData(ctx, []*pb.Payload_Metric{intMetric(t, "x", 2)}) }()
+	wait(t, "the publish reaching the transport", tr.arrived)
+
+	closed := make(chan error, 1)
+	go func() { closed <- n.Close(ctx) }()
+	err = wait(t, "the publish in flight at Close", published)
+	if !errors.Is(err, ErrClosed) || !errors.Is(err, errHeldPublish) || !errors.Is(err, context.Canceled) {
+		t.Errorf("publish in flight at Close: %v, want ErrClosed and the transport's error", err)
+	}
+	if err := wait(t, "Close", closed); err != nil {
+		t.Errorf("Close: %v", err)
+	}
+	ndeath := topic.Topic{GroupID: "testGroup", Type: topic.NDEATH, EdgeNodeID: "testNode"}.String()
+	if !publishedTo(tr.mockTransport, ndeath) {
+		t.Error("Close published no NDEATH")
 	}
 }
 

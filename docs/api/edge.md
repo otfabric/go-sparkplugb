@@ -100,6 +100,12 @@ type Device struct {
 ```go
 type Metrics interface {
 	OnConnect(brokerURL string, d time.Duration, err error)
+	// OnPublish is called for each message the node hands to the transport,
+	// the NDEATH of Disconnect and Close included, once the transport's
+	// Publish has returned: with the message type ("NBIRTH", "DDATA"), how
+	// long Publish took, and the error the publish returned. It is called on
+	// the goroutine that published, with none of the node's locks held. A
+	// message the node refuses before the transport is not reported.
 	OnPublish(messageType string, d time.Duration, err error)
 	OnMessage(messageType string)
 	OnStateChange(old, new State)
@@ -147,6 +153,9 @@ type Node struct {
 	// lastTS is the payload timestamp of the last message handed to the
 	// transport, under seqMu: the next NBIRTH is stamped later (birthTime).
 
+	// published are the messages handed to the transport under seqMu, for
+	// Metrics.OnPublish once seqMu is released (unlockSeq).
+
 	// the clock of birthTime
 	// held to publish; Disconnect takes it to end the session
 
@@ -173,7 +182,9 @@ func (n *Node) Close(ctx context.Context) error
 
 Close disconnects the node, as Disconnect does, and closes it: Connect then returns ErrClosed, and a Connect in progress, a walk to another server included, ends with ErrClosed and leaves no connection up. The other operations return an error that matches ErrClosed, and ErrNotConnected or ErrNoBirth; Disconnect returns nil.
 
-Close returns once the goroutines the node started have ended: a rebirth an NCMD asked for, whose publishes end with Close, and a walk to another server, which publishes its NDEATH first. Called from a callback that such a goroutine runs (OnState during a walk), Close does not wait for that one, which ends after the callback. A callback the transport is running when Close is called (OnNodeCmd, OnDeviceCmd) may finish after Close has returned.
+A publish on its way to the transport when Close is called ends with it: the context the transport has for it ends, and Close waits for the transport to return before it publishes the NDEATH. An error the transport then returns comes back wrapped, so that it matches ErrClosed as well as the transport's error.
+
+Close returns once the goroutines the node started have ended: a rebirth an NCMD asked for, whose publishes end with Close, and a walk to another server, which publishes its NDEATH first. Called from a callback that such a goroutine runs (OnState during a walk, Metrics.OnPublish during a walk or a rebirth), Close does not wait for that one, which ends after the callback. A callback the transport is running when Close is called (OnNodeCmd, OnDeviceCmd) may finish after Close has returned.
 
 Close is safe to call more than once and from several goroutines: the first call closes the node, the others return nil at once.
 
@@ -205,7 +216,7 @@ PublishBirth publishes the NBIRTH of a new session with nodeMetrics, after bdSeq
 func (n *Node) PublishDeviceBirth(ctx context.Context, deviceID string, metrics []*pb.Payload_Metric) error
 ```
 
-PublishDeviceBirth publishes the DBIRTH of a device. It sets the timestamp of a metric that has none, and keeps copies of the metrics for Rebirth, as PublishBirth does.
+PublishDeviceBirth publishes the DBIRTH of a device. It sets the timestamp of a metric that has none, and keeps copies of the metrics for Rebirth, as PublishBirth does. A device ID that cannot be the device segment of a topic, one that is empty, not valid UTF-8, or contains '/', '+' or '#', returns topic.ErrInvalidID, and nothing is published; so it does for PublishDeviceData and PublishDeviceDeath.
 
 #### func (Node) PublishDeviceData
 
@@ -213,11 +224,15 @@ PublishDeviceBirth publishes the DBIRTH of a device. It sets the timestamp of a 
 func (n *Node) PublishDeviceData(ctx context.Context, deviceID string, metrics []*pb.Payload_Metric) error
 ```
 
+PublishDeviceData publishes the DDATA of a device. A device ID that PublishDeviceBirth refuses returns topic.ErrInvalidID, and nothing is published.
+
 #### func (Node) PublishDeviceDeath
 
 ```go
 func (n *Node) PublishDeviceDeath(ctx context.Context, deviceID string) error
 ```
+
+PublishDeviceDeath publishes the DDEATH of a device. A device ID that PublishDeviceBirth refuses returns topic.ErrInvalidID, and nothing is published.
 
 #### func (Node) PublishNodeData
 

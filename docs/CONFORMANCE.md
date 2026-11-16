@@ -19,7 +19,7 @@ applicable (broker or server requirement).
 | Topic namespace `spBv1.0/{group}/{type}/{node}/[{device}]` | — | Y | topic package |
 | Group ID: valid UTF-8, no `/`, `+`, `#` | tck-id-topics-group-id | Y | `topic.Parse` on receipt; `edge.New` for the configured ID |
 | Edge Node ID: valid UTF-8, no `/`, `+`, `#` | tck-id-topics-edge-node-id | Y | `topic.Parse` on receipt; `edge.New` for the configured ID |
-| Device ID: valid UTF-8, no `/`, `+`, `#` | tck-id-topics-device-id | P | `topic.Parse` on receipt; the device ID given to `PublishDeviceBirth` and the other device methods is not checked |
+| Device ID: valid UTF-8, no `/`, `+`, `#` | tck-id-topics-device-id | Y | `topic.Parse` on receipt; `PublishDeviceBirth`, `PublishDeviceData` and `PublishDeviceDeath` for the device ID they are given |
 
 ### Message Types
 
