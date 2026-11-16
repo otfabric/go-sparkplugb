@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/otfabric/go-sparkplugb/mqtt"
@@ -210,17 +211,20 @@ func TestHostSessionWaitEnds(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			a, tr := sessApp(t)
-			tr.deliverToAll(sessTopic(topic.NBIRTH, ""), sessMsg(0, 100, payload.BdSeqMetric(0)))
-			for i := uint64(1); i <= 5; i++ {
-				tr.deliverToAll(sessTopic(topic.NDATA, ""), sessMsg(i, 100+i))
-			}
-			tr.deliverToAll(sessTopic(topic.DBIRTH, "d1"), sessMsg(1, 300))
-			end(a, tr)
-			time.Sleep(3 * a.sessionWait)
-			if n := rebirths(tr); n != 0 {
-				t.Errorf("%d rebirth requests, want none", n)
-			}
+			synctest.Test(t, func(t *testing.T) {
+				a, tr := sessApp(t)
+				tr.deliverToAll(sessTopic(topic.NBIRTH, ""), sessMsg(0, 100, payload.BdSeqMetric(0)))
+				for i := uint64(1); i <= 5; i++ {
+					tr.deliverToAll(sessTopic(topic.NDATA, ""), sessMsg(i, 100+i))
+				}
+				tr.deliverToAll(sessTopic(topic.DBIRTH, "d1"), sessMsg(1, 300))
+				end(a, tr)
+				time.Sleep(3 * a.sessionWait) // the clock of the bubble
+				synctest.Wait()
+				if n := rebirths(tr); n != 0 {
+					t.Errorf("%d rebirth requests, want none", n)
+				}
+			})
 		})
 	}
 }
@@ -382,7 +386,7 @@ func (s *sessionNet) settle() {
 			continue
 		}
 		idle++
-		time.Sleep(200 * time.Microsecond)
+		synctest.Wait() // the rebirth requests on their way
 	}
 }
 
@@ -418,7 +422,7 @@ func (s *sessionNet) quiet(a *App) string {
 		if s.current(a) == "" {
 			return ""
 		}
-		time.Sleep(5 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond) // the clock of the bubble
 	}
 	s.settle()
 	return s.current(a)
@@ -429,29 +433,18 @@ func (s *sessionNet) quiet(a *App) string {
 // a start-up, three updates, and the rebirths they lead to.
 func TestHostConvergesOnReorderedSessions(t *testing.T) {
 	const seeds = 400
-	var (
-		wg     sync.WaitGroup
-		mu     sync.Mutex
-		failed = map[string]int{}
-		sem    = make(chan struct{}, 64)
-	)
+	failed := map[string]int{}
 	for seed := int64(0); seed < seeds; seed++ {
-		wg.Add(1)
-		sem <- struct{}{}
-		go func() {
-			defer wg.Done()
-			defer func() { <-sem }()
+		synctest.Test(t, func(t *testing.T) {
 			s := &sessionNet{clock: 1000, rng: rand.New(rand.NewSource(seed)), queues: map[string][][]byte{}}
 			a, err := New(s, testConfig())
 			if err != nil {
-				t.Error(err)
-				return
+				t.Fatal(err)
 			}
 			a.sessionWait = 20 * time.Millisecond
 			defer func() { _ = a.Close(context.Background()) }()
 			if err := a.Connect(context.Background()); err != nil {
-				t.Error(err)
-				return
+				t.Fatal(err)
 			}
 			s.mu.Lock()
 			s.birth()
@@ -466,13 +459,10 @@ func TestHostConvergesOnReorderedSessions(t *testing.T) {
 				why = s.quiet(a)
 			}
 			if why != "" {
-				mu.Lock()
 				failed[why]++
-				mu.Unlock()
 			}
-		}()
+		})
 	}
-	wg.Wait()
 	if len(failed) > 0 {
 		t.Errorf("of %d seeds, did not converge: %v", seeds, failed)
 	}

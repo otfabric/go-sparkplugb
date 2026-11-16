@@ -5,6 +5,7 @@ package app
 import (
 	"context"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/otfabric/go-sparkplugb/payload"
@@ -71,21 +72,23 @@ func TestApplicationRestartWithSameBdSeqComesOnline(t *testing.T) {
 
 // After lateBirthWait an NBIRTH counts again, and one with another bdSeq always does.
 func TestApplicationNDEATHMemoryLimits(t *testing.T) {
-	a, tr := sessApp(t)
-	tr.deliver(sessTopic(topic.NBIRTH, ""), sessMsg(0, 100, payload.BdSeqMetric(1)))
-	tr.deliver(sessTopic(topic.NDEATH, ""), sessDeath(1))
-	tr.deliver(sessTopic(topic.NBIRTH, ""), sessMsg(0, 200, payload.BdSeqMetric(2)))
-	if !a.GetNode("g1", "n1").Online {
-		t.Fatal("next session not online")
-	}
+	synctest.Test(t, func(t *testing.T) {
+		a, tr := sessApp(t)
+		tr.deliver(sessTopic(topic.NBIRTH, ""), sessMsg(0, 100, payload.BdSeqMetric(1)))
+		tr.deliver(sessTopic(topic.NDEATH, ""), sessDeath(1))
+		tr.deliver(sessTopic(topic.NBIRTH, ""), sessMsg(0, 200, payload.BdSeqMetric(2)))
+		if !a.GetNode("g1", "n1").Online {
+			t.Fatal("next session not online")
+		}
 
-	tr.deliver(sessTopic(topic.NDEATH, ""), sessDeath(2))
-	a.lateBirthWait = time.Millisecond
-	time.Sleep(5 * time.Millisecond)
-	tr.deliver(sessTopic(topic.NBIRTH, ""), sessMsg(0, 300, payload.BdSeqMetric(2)))
-	if !a.GetNode("g1", "n1").Online {
-		t.Error("NBIRTH ignored after the wait")
-	}
+		tr.deliver(sessTopic(topic.NDEATH, ""), sessDeath(2))
+		a.lateBirthWait = time.Millisecond
+		time.Sleep(5 * time.Millisecond) // the clock of the bubble: past lateBirthWait
+		tr.deliver(sessTopic(topic.NBIRTH, ""), sessMsg(0, 300, payload.BdSeqMetric(2)))
+		if !a.GetNode("g1", "n1").Online {
+			t.Error("NBIRTH ignored after the wait")
+		}
+	})
 }
 
 // The death the host ignored for its bdSeq is reported when that NBIRTH

@@ -11,7 +11,7 @@ The packages of `github.com/otfabric/go-sparkplugb`. `go doc -all ./<package>` h
 | `payload` | Metrics, `Encode`, `Decode`, `GetValue`, `SetValue`, DataSets, Templates |
 | `topic` | `Parse`, `Topic`, the `For*` builders |
 | `proto` | Generated Protobuf code (EPL-2.0, see [docs/LICENSING.md](docs/LICENSING.md)) |
-| `sparkplugb` (root) | `Logger`, `FieldLogger`, `RetryPolicy`, `ExponentialBackoff`, `NoRetry`, `SessionChecks`, `SessionDropMetrics` |
+| `sparkplugb` (root) | `Logger`, `FieldLogger`, `RetryPolicy`, `ExponentialBackoff`, `NoRetry`, `SessionChecks`, `SessionDropMetrics`, `HeldDropMetrics` |
 
 ## Lifecycle
 
@@ -21,11 +21,17 @@ All three runtimes take a transport and a `Config`: `New(transport, cfg)`, then 
 
 `Close` is safe to call more than once and from several goroutines: the first call closes the runtime, the others return nil at once. A `Connect` in progress when `Close` is called, the edge node's walk to another server included, returns `ErrClosed` and leaves no connection up; the state stays `Closed`.
 
+`Close` returns once the goroutines and timers the runtime started have ended: the edge node's rebirth that an NCMD asked for and its walk to another server, the rebirth requests of `host` and `app` and their timers. `Close` ends them first: their publishes and connects end with it, and a rebirth request not yet sent is not sent; only the NDEATH that a walk publishes as it leaves a server goes on, within 10 s, so that the broker does not discard the will. Called from a callback that one of these goroutines runs (`OnState`, `RetryPolicy.ShouldRetry` or `Metrics.OnConnect` during a walk), `Close` does not wait for that goroutine, which ends after the callback returns; it waits for the others. If such a goroutine runs a callback that waits for a lock the caller of `Close` holds, `Close` does not return: do not hold it across `Close`. A callback the transport is running when `Close` is called (`OnNodeCmd`, `OnNodeData`, say) may finish after `Close` returned.
+
+Once `Close` was called, while it disconnects and after it returned, an operation returns an error that matches `ErrClosed` and the error it returns on an open runtime that cannot do it: `ErrNotConnected` or `ErrNoBirth` for the edge node's publishes and `Rebirth`, `ErrNotConnected` for the commands of `host` and `app`. `Disconnect` returns nil.
+
 An edge node goes through `PublishBirth`, `PublishDeviceBirth`, then `PublishNodeData`, `PublishDeviceData` and `PublishDeviceDeath`. Data before the birth returns `ErrNoBirth`. Aliases must be unique across the node: a birth that breaks that returns `ErrDuplicateID`. Template definitions go in the NBIRTH only, and every template instance of the node and its devices refers to one of them: a message that breaks that returns `payload.ErrUnknownTemplate` or `payload.ErrInvalidTemplate` and is not published. `payload.NewTemplateDefs` and `TemplateDefs.Check` do the same check for a caller; `host` and `app` use them on receipt and log what breaks it.
 
 An edge node has one connection at a time: `Connect` while it is connecting or connected returns `ErrAlreadyConnected` and leaves the connection as it is. `Rebirth` repeats the births of the current connection: before the program's `PublishBirth` on that connection it returns `ErrNoBirth` and publishes nothing, and so does a rebirth an NCMD asks for. After `Disconnect` or a lost connection every device is offline until `PublishDeviceBirth` is called for it again, so a rebirth repeats only the DBIRTHs of the current connection. A message that `Publish` hands to the transport takes its `seq` even when the transport returns an error, since the message may have gone out; one that is not handed over, for a `ctx` that has already ended, does not.
 
 In `host` and `app`, an NDEATH of an edge node that was never born calls neither `OnNodeDeath` nor `Metrics.OnNodeDeath`.
+
+The messages `host` and `app` hold for reordering are bounded over all edge nodes, at 4096 messages and 8 MiB of payload ([SECURITY.md](SECURITY.md)); to make room for the next one, the oldest held message of any edge node is dropped and logged at debug level. A `Metrics` that implements `sparkplugb.HeldDropMetrics` has `OnHeldDrop(groupID, edgeNodeID, messageType)` called for each message so dropped. A held message that waited 30 s for the gap before it is dropped without this call. `Metrics` itself is unchanged.
 
 ## Callbacks
 
@@ -34,7 +40,7 @@ In `host` and `app`, an NDEATH of an edge node that was never born calls neither
 | `OnState` of `edge`, `host`, `app`; `Metrics.OnStateChange` | The goroutine that made the transition (the caller of `Connect`, `Disconnect` or `Close`, the transport's for a lost connection or a STATE, the edge node's while it walks), or one that was delivering an earlier transition | none | yes: `State`, `PublishBirth` on `Online`, `Close`, `Connect` after `Disconnected`. A transition the call makes is delivered after the handler returns |
 | `edge`: `OnNodeCmd`, `OnDeviceCmd`; `Metrics.OnMessage` | The transport's, per message | none | yes |
 | `host`, `app`: `OnNodeBirth`, `OnNodeData`, `OnNodeDeath`, `OnDeviceBirth`, `OnDeviceData`, `OnDeviceDeath`; `Metrics.OnNodeBirth`, `OnNodeDeath` | The transport's, per message | none | yes |
-| `host`, `app`: `Config.SessionChecksFor`; `SessionDropMetrics.OnSessionDrop` | The transport's, per message | none | `SessionChecksFor`: no, it must not block; `OnSessionDrop`: yes |
+| `host`, `app`: `Config.SessionChecksFor`; `SessionDropMetrics.OnSessionDrop`; `HeldDropMetrics.OnHeldDrop` | The transport's, per message | none | `SessionChecksFor`: no, it must not block; `OnSessionDrop`, `OnHeldDrop`: yes |
 | `edge`: `RetryPolicy.ShouldRetry`, `Metrics.OnConnect` | The edge node's, while it walks to another server | none | yes |
 | `edge`: `BdSeqStore.Load`, `Store` | The caller of `Connect` | the node's | no |
 | `Logger` | Any goroutine of the runtime | sometimes | no |

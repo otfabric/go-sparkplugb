@@ -25,7 +25,8 @@ Every call of application code (the callbacks of `Config`, `Metrics`, the `Logge
 - Messages arrive on the goroutines of the transport, which call the handler given to `Subscribe`. Callbacks in `Config` run there, without a lock of the runtime held, so a slow callback holds up the message flow.
 - The edge node publishes one message at a time: a message takes its `seq` and goes to the transport under one lock, which a rebirth holds for its NBIRTH and all its DBIRTHs. Publishes from several goroutines are safe and reach the wire in `seq` order, given the ordering `mqtt.Transport.Publish` documents; a slow `Publish` of the transport holds up the others. `PahoTransport.Publish` keeps that ordering by returning, on its context or timeout too, only once paho has the message in line, or once the connection has ended.
 - The edge node starts one goroutine per auto-rebirth (`edge.go`, on an NCMD rebirth request) and one for server walking.
-- `host` and `app` start one goroutine per rebirth request they send, at most 16 at a time over all edge nodes.
+- `host` and `app` start one goroutine per rebirth request they send, at most 16 at a time over all edge nodes, and timers: the wait for an NBIRTH, the reorder wait (`host`, with `ReorderTimeout`), and the sweep of the held messages.
+- These goroutines and timers are kept in an `internal/routine.Group`, and start only while the runtime is open, under its lock. `Close` cancels the context they run with, stops the timers, and waits for the group. It does not wait for the goroutine it is called on, which `Group.Wait` tells by the goroutine's identifier: a callback that one of them runs may call `Close`. The goroutines of the transport, and the callbacks they run, are not the runtime's: `Close` does not wait for them.
 - `PahoTransport.Connect` waits for the CONNACK, its context and its timeout without holding the transport's lock.
 
 ## Reordering

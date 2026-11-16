@@ -9,7 +9,7 @@ distinct values.
 
 | Error | Returned when |
 |---|---|
-| `ErrClosed` | `Connect` is called on a closed node, or `Close` is called while `Connect` or a walk to another server is in progress |
+| `ErrClosed` | `Connect` is called on a closed node, or `Close` is called while `Connect` or a walk to another server is in progress. Once `Close` was called, the publishes and `Rebirth` return an error that matches `ErrClosed` and `ErrNotConnected` or `ErrNoBirth`, as on an open node that is not online or not born |
 | `ErrNotConnected` | `PublishBirth` or `Rebirth` is called when the node is not online |
 | `ErrNoBirth` | Node data or a device birth, data or death comes before the node's birth; `Rebirth` before the program's `PublishBirth` on the current connection |
 | `ErrAlreadyConnected` | `Connect` while the node is connecting or connected; `Disconnect` first |
@@ -23,7 +23,7 @@ distinct values.
 
 | Error | Returned when |
 |---|---|
-| `ErrClosed` | `Connect` is called on a closed host application, or `Close` is called while `Connect` is in progress |
+| `ErrClosed` | `Connect` is called on a closed host application, or `Close` is called while `Connect` is in progress. Once `Close` was called, `SendNodeCommand`, `SendDeviceCommand` and `RequestRebirth` return an error that matches `ErrClosed` and `ErrNotConnected` |
 | `ErrNotConnected` | An NCMD or DCMD is sent without a connection |
 | `topic.ErrInvalidID` | `New` with a `HostID` that is not valid UTF-8 or contains `/`, `+` or `#` |
 
@@ -34,7 +34,7 @@ with the `payload` error, and applies and delivers the message.
 
 | Error | Returned when |
 |---|---|
-| `ErrClosed` | `Connect` is called on a closed application, or `Close` is called while `Connect` is in progress |
+| `ErrClosed` | `Connect` is called on a closed application, or `Close` is called while `Connect` is in progress. Once `Close` was called, `SendNodeCommand`, `SendDeviceCommand` and `RequestRebirth` return an error that matches `ErrClosed` and `ErrNotConnected` |
 | `ErrNotConnected` | An NCMD or DCMD is sent without a connection |
 
 Received templates: as `host`.

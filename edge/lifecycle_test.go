@@ -36,6 +36,18 @@ func (g *gate) pass() {
 	<-g.open
 }
 
+// passCtx is pass, which also ends when ctx does, as a transport's call does.
+func (g *gate) passCtx(ctx context.Context) {
+	if g == nil {
+		return
+	}
+	g.once.Do(func() { close(g.arrived) })
+	select {
+	case <-g.open:
+	case <-ctx.Done():
+	}
+}
+
 // eventTransport is the mock transport with gates on some of its methods,
 // and the topics it publishes and subscribes to sent to channels.
 type eventTransport struct {
@@ -69,7 +81,7 @@ func (e *eventTransport) gates() (connect, subscribe, disconnect *gate, subscrib
 
 func (e *eventTransport) Connect(ctx context.Context, opts mqtt.ConnectOpts) error {
 	g, _, _, _ := e.gates()
-	g.pass()
+	g.passCtx(ctx)
 	return e.mockTransport.Connect(ctx, opts)
 }
 
@@ -486,7 +498,8 @@ func TestWalkBirthsOnTheNextServer(t *testing.T) {
 	}
 }
 
-// L16: Close while the walk connects to the next server.
+// L16: Close while the walk connects to the next server ends that connect,
+// and returns once the walk has ended.
 func TestCloseDuringWalk(t *testing.T) {
 	e := newEventTransport()
 	var n *Node
@@ -503,17 +516,27 @@ func TestCloseDuringWalk(t *testing.T) {
 	nextPublished(t, e, topic.NBIRTH)
 
 	g := newGate()
+	t.Cleanup(func() { close(g.open) })
 	e.mu.Lock()
 	e.connect = g
 	e.mu.Unlock()
 	e.deliver(topic.ForState("host"), hostState(false, 2))
 	wait(t, "the walk's connect reaching the transport", g.arrived)
-	if err := n.Close(context.Background()); err != nil {
-		t.Errorf("Close: %v", err)
+	within(t, "Close during the walk", func() {
+		if err := n.Close(context.Background()); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
+	select {
+	case err := <-connects:
+		if !errors.Is(err, ErrClosed) {
+			t.Errorf("walk's Connect during Close: %v, want ErrClosed", err)
+		}
+	default:
+		t.Fatal("Close returned before the walk's connect ended")
 	}
-	close(g.open)
-	if err := wait(t, "the connect of the walk", connects); !errors.Is(err, ErrClosed) {
-		t.Errorf("walk's Connect during Close: %v, want ErrClosed", err)
+	if n.owned.Len() != 0 {
+		t.Error("the walk still runs after Close returned")
 	}
 	if s := n.State(); s != Closed {
 		t.Errorf("state %s after Close, want closed", s)

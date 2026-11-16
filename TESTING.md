@@ -32,7 +32,7 @@ The interop suite (build tag `interop`) skips without Docker, or fails with `SPA
 
 ## Time and events
 
-New tests wait for events, not for time: a gate in a test transport that reports when a call arrived and holds it until the test opens it, a channel the transport sends its publishes and subscriptions to, a `Metrics` that reports each connect. A bound far above the time the event takes (10 s) turns a missed event into a failure, not a test that never ends. Tests of what time does, the age of held messages and the sweep, run in a `testing/synctest` bubble (`host/bounds_test.go`, `app/bounds_test.go`).
+New tests wait for events, not for time: a gate in a test transport that reports when a call arrived and holds it until the test opens it, a channel the transport sends its publishes and subscriptions to, a `Metrics` that reports each connect. A bound far above the time the event takes (10 s) turns a missed event into a failure, not a test that never ends. Tests of what time does, the age of held messages, the sweep, the reorder and session waits, the throttling of rebirth requests, run in a `testing/synctest` bubble (in `host` and `app`), and so do tests that wait for the goroutines of a runtime to finish: `synctest.Wait` returns once every other goroutine of the bubble is blocked, where a sleep guessed how long they take. `TestHostConvergesOnReorderedSessions` and its `app` twin run each seed in a bubble. A test that waits for an event outside a bubble polls with a deadline (`waitFor`, `eventually`, `waitLive`).
 
 ## Fuzz targets and budgets
 
@@ -55,23 +55,23 @@ The long-lived types: `edge.Node`, `host.App`, `app.Application` and `mqtt.PahoT
 | Row | `edge.Node` | `host.App` | `app.Application` | `mqtt.PahoTransport` |
 |---|---|---|---|---|
 | L1 Close twice | `TestCloseIsIdempotent` | `TestHostCloseIdempotent` | `TestApplicationCloseIdempotent` | `TestZeroValuePahoTransport` (`Disconnect` twice) |
-| L2 Two goroutines call Close | `TestCloseFromTwoGoroutines` | `TestHostCloseFromTwoGoroutines` | `TestApplicationCloseFromTwoGoroutines` | gap: no test of two concurrent `Disconnect` calls |
-| L3 Close during a blocked read | n/a: no reader of its own; message callbacks in flight may run after `Close` (not tested) | as `edge` | as `edge` | `TestOperationsEndWithTheConnection` |
-| L4 Close during a write | `TestPublishAfterSessionEnded`, `TestNoBirthAfterNDEATH` | gap: no test of `Close` during a command | gap: as `host` | `TestPublishOnEndedContextKeepsItsPlace`, `TestPublishWithEndedContextIsNotSent` |
+| L2 Two goroutines call Close | `TestCloseFromTwoGoroutines` | `TestHostCloseFromTwoGoroutines` | `TestApplicationCloseFromTwoGoroutines` | `TestDisconnectFromTwoGoroutines` |
+| L3 Close during a blocked read | no reader of its own: `TestCommandHandlerRunningAtClose` (a command callback in flight at `Close`: `Close` returns, what it calls afterwards returns `ErrClosed`) | `TestHostCallbackRunningAtClose` (as `edge`, with `OnNodeData`) | `TestApplicationCallbackRunningAtClose` | `TestOperationsEndWithTheConnection` |
+| L4 Close during a write | `TestPublishAfterSessionEnded`, `TestNoBirthAfterNDEATH`, `TestOperationsAfterClose` ("during Close") | `TestHostCloseDuringCommand` (`Close` returns; the command returns what the transport returns), `TestHostCommandsAfterClose` | `TestApplicationCloseDuringCommand`, `TestApplicationCommandsAfterClose` | `TestPublishOnEndedContextKeepsItsPlace`, `TestPublishWithEndedContextIsNotSent` |
 | L5 Close during the handshake | `TestCloseDuringConnect` | `TestHostCloseDuringConnect` | `TestApplicationCloseDuringConnect` | `TestDisconnectDuringConnect` |
 | L6 Cancel a pending request | n/a: the context goes to the transport | n/a: as `edge` | n/a: as `edge` | `TestOperationsHonourContext`, `TestConnectThatEndsDoesNotConnectLater`, `TestConnectWithEndedContext` |
 | L7 Response after the request timed out | n/a: no request/response correlation | n/a: as `edge` | n/a: as `edge` | n/a: Paho correlates |
 | L8 Response after reconnect | `TestStaleConnectionGeneration` | n/a: a session is per edge node, not per connection | n/a: as `host` | `TestConnectThatEndsDoesNotConnectLater` (a CONNACK after the attempt ended) |
 | L9 Callback calls a public method | `TestStateHandlerCallsNode`, `TestStateHandlerConnectsWhenDisconnected` | `TestHostStateHandlerCallsHost`, `TestHostStateHandlerConnectsWhenDisconnected` | `TestApplicationStateHandlerCallsApplication`, `TestApplicationStateHandlerConnectsWhenDisconnected` | n/a: `OnConnectionLost` is called without the transport's lock |
-| L10 Callback calls Close | `TestStateHandlerCallsNode` ("Close when disconnected") | `TestHostStateHandlerCallsHost` | `TestApplicationStateHandlerCallsApplication` | n/a: as L9 |
-| L11 Slow callback | gap: the head-of-line wait is documented (ARCHITECTURE.md), not tested | gap: as `edge` | gap: as `edge` | n/a |
+| L10 Callback calls Close | `TestStateHandlerCallsNode` ("Close when disconnected"), `TestCloseFromTheWalk` (`OnState`, `Metrics.OnConnect`, `RetryPolicy` during a walk) | `TestHostStateHandlerCallsHost` | `TestApplicationStateHandlerCallsApplication` | n/a: as L9 |
+| L11 Slow callback | `TestSlowCommandHandler`: the node's state, data and `Rebirth` go on; the next message waits (ARCHITECTURE.md) | `TestHostSlowCallback`: as `edge`, with `State`, `GetNode`, `Nodes` and a command | `TestApplicationSlowCallback` | n/a |
 | L12 Queue at capacity | n/a: no queue; a publish waits for the transport | `TestHostHeldMessagesBoundedOverAllNodes`, `TestHostRebirthRequestsBoundedOverAllNodes`, `TestHostForgetsSilentNodes`, `TestHostThrottlesSeqGapRebirths` | the `app` twins | n/a |
 | L13 Concurrent sessions | n/a: one session | `TestHostSessionCollisionInSequence`, `TestHostConvergesOnReorderedSessions` | `TestApplicationSessionCollisionInSequence`, `TestApplicationNodeReplacement` | n/a: one connection |
 | L14 Failure during construction or startup | `TestConnectFailure`, `TestConnectSetupFailureDisconnects`, `TestConnectBdSeqLoadError`, `TestBdSeqStoreThatDoesNotReturnNormally`, `TestNewRefusesInvalidIDs` | `TestHostConnectFailure`, `TestHostConnectSetupFailureDisconnects`, `TestHostNewRefusesInvalidHostID` | `TestApplicationConnectError`, `TestApplicationSubscribeFailureDisconnects` | `TestConnectThatEndsDoesNotConnectLater` |
 | L15 `Shutdown(ctx)` | n/a: no graceful drain; `Close(ctx)` gives its context to the last publish and the disconnect | n/a: as `edge` | n/a: as `edge` | n/a |
-| L16 Close racing reconnect | `TestCloseDuringWalk` | n/a: no reconnect of its own | n/a: as `host` | n/a: automatic reconnection is off |
+| L16 Close racing reconnect | `TestCloseDuringWalk` (`Close` returns once the walk ended) | n/a: no reconnect of its own | n/a: as `host` | n/a: automatic reconnection is off |
 
-`Close` does not wait for the goroutines its runtime started (auto-rebirth, server walking, rebirth requests) to end, and an operation after `Close` returns `ErrNotConnected` or `ErrNoBirth` ([ERRORS.md](ERRORS.md)).
+`Close` returns once the goroutines and timers its runtime started have ended: `TestCloseEndsTheRebirth` (an auto-rebirth waiting for the broker), `TestCloseDuringWalk`, `TestHostCloseEndsRebirthRequests`, `TestHostCloseStopsTimersArmedAfterConnectionLost` and their `app` twins, `internal/routine` for the group they are kept in. An operation once `Close` was called returns an error that matches `ErrClosed` and the error it returned before, `ErrNotConnected` or `ErrNoBirth` ([ERRORS.md](ERRORS.md)): `TestOperationsAfterClose`, `TestHostCommandsAfterClose`, `TestApplicationCommandsAfterClose`. `goleak` checks at the end of each package that no goroutine is left.
 
 ## Fuzz regressions
 
@@ -84,7 +84,9 @@ Keep a failing input as a `testdata/fuzz/<Target>/` file next to the target and 
 | Pull request | `pr.yml` | `docs.yml` (docsync, otfabric-policy) always; `ci.yaml`, `interop.yml` unless every changed file is documentation; then `OT Fabric Required Checks` |
 | Push to a branch | none | nothing; dispatch `ci.yaml`, `interop.yml` to test a branch without a pull request |
 | Push to `main` | `docs.yml` | the light checks; the merged commit was tested as the pull request's merge commit |
-| Schedule | `check-spec.yaml`, `interop.yml` | the scheduled runs, on `main` |
+| Schedule | `check-spec.yaml`, `interop.yml` | the scheduled runs, on `main`: `interop.yml` nightly; `check-spec.yaml` weekly, the check of the upstream proto and the tests on a 32-bit architecture (job `test-386`, `GOARCH=386 go test -count=1 ./...`) |
 | Release | `release.yaml` | the release workflow tests the release commit again |
+
+The tiers are those of otfabric/engineering `standards/testing.md#ci-tiers`. Pull requests run the fast gate and the interop suite; the 32-bit run is in the scheduled tier, not on pull requests: dispatch `check-spec.yaml` to run it on a branch. It runs without `-race`, which `386` does not support.
 
 Documentation means an added or modified `*.md` file outside `.github/`, `testdata/` and `vendor/`, other than `AGENTS.md` and `CLAUDE.md`. A deleted or renamed document, or any other file, runs everything. `OT Fabric Required Checks` fails unless every job that applies succeeded; its summary lists them.

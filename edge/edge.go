@@ -12,6 +12,7 @@ import (
 
 	sparkplugb "github.com/otfabric/go-sparkplugb"
 	"github.com/otfabric/go-sparkplugb/internal/callback"
+	"github.com/otfabric/go-sparkplugb/internal/routine"
 	"github.com/otfabric/go-sparkplugb/mqtt"
 	"github.com/otfabric/go-sparkplugb/payload"
 	pb "github.com/otfabric/go-sparkplugb/proto"
@@ -20,6 +21,10 @@ import (
 )
 
 var (
+	// ErrClosed is returned by Connect on a node that Close was called on,
+	// and by a Connect that Close overtook. After Close the publishes and
+	// Rebirth return an error that matches ErrClosed, and ErrNotConnected or
+	// ErrNoBirth as they do on an open node that is not online or not born.
 	ErrClosed       = errors.New("sparkplugb: closed")
 	ErrNotConnected = errors.New("sparkplugb: not connected")
 	ErrNoBirth      = errors.New("sparkplugb: birth not published")
@@ -34,6 +39,14 @@ var (
 	// Deprecated: operations in the wrong state return ErrNotConnected, ErrNoBirth
 	// or ErrClosed. It stays for source compatibility.
 	ErrInvalidState = errors.New("sparkplugb: invalid state transition")
+)
+
+// errClosedNotConnected and errClosedNoBirth are what the operations return
+// once Close was called: they match ErrClosed, and the error the operation
+// returns while the node is open and not connected or not born.
+var (
+	errClosedNotConnected = fmt.Errorf("%w: %w", ErrClosed, ErrNotConnected)
+	errClosedNoBirth      = fmt.Errorf("%w: %w", ErrClosed, ErrNoBirth)
 )
 
 type State uint8
@@ -159,7 +172,14 @@ type Node struct {
 	owners  map[uint64]string // alias -> device ID, "" for the node
 	born    bool
 	gen     uint64 // connection generation; prevents stale callbacks
-	closeCh chan struct{}
+
+	// life ends when Close is called (stop): the goroutines of the node wait
+	// on it, so that Close ends what they wait for, and owned has them, so
+	// that Close waits for them: the rebirth an NCMD asks for, and the walk
+	// to another server.
+	life  context.Context
+	stop  context.CancelFunc
+	owned routine.Group
 
 	transitions callback.Queue[transition] // state transitions not yet delivered (notify)
 
@@ -234,13 +254,15 @@ func New(transport mqtt.Transport, cfg Config) (*Node, error) {
 		cfg.ClientID = fmt.Sprintf("sparkplug_%s_%s", cfg.GroupID, cfg.EdgeNodeID)
 	}
 
+	life, stop := context.WithCancel(context.Background())
 	return &Node{
 		cfg:       cfg,
 		transport: transport,
 		devices:   make(map[string]*Device),
 		aliases:   make(map[uint64]string),
 		owners:    make(map[uint64]string),
-		closeCh:   make(chan struct{}),
+		life:      life,
+		stop:      stop,
 		now:       time.Now,
 	}, nil
 }
@@ -446,9 +468,9 @@ func (n *Node) PublishBirth(ctx context.Context, nodeMetrics []*pb.Payload_Metri
 
 func (n *Node) publishBirth(ctx context.Context, nodeMetrics []*pb.Payload_Metric) error {
 	n.mu.Lock()
-	if n.state != Online {
+	if n.closed || n.state != Online {
 		n.mu.Unlock()
-		return ErrNotConnected
+		return n.notConnected()
 	}
 	// An NBIRTH starts a new session, so only its own metrics can collide.
 	if err := aliasConflict(nil, "", nodeMetrics); err != nil {
@@ -533,9 +555,9 @@ func (n *Node) PublishDeviceBirth(ctx context.Context, deviceID string, metrics 
 
 func (n *Node) publishDeviceBirth(ctx context.Context, deviceID string, metrics []*pb.Payload_Metric) error {
 	n.mu.Lock()
-	if !n.born {
+	if n.closed || !n.born {
 		n.mu.Unlock()
-		return ErrNoBirth
+		return n.noBirth()
 	}
 	if err := aliasConflict(n.owners, deviceID, metrics); err != nil {
 		n.mu.Unlock()
@@ -600,9 +622,9 @@ func (n *Node) PublishNodeData(ctx context.Context, metrics []*pb.Payload_Metric
 
 func (n *Node) publishNodeData(ctx context.Context, metrics []*pb.Payload_Metric) error {
 	n.mu.Lock()
-	if !n.born {
+	if n.closed || !n.born {
 		n.mu.Unlock()
-		return ErrNoBirth
+		return n.noBirth()
 	}
 	if err := n.templates.Check(metrics, false); err != nil {
 		n.mu.Unlock()
@@ -626,9 +648,9 @@ func (n *Node) PublishDeviceData(ctx context.Context, deviceID string, metrics [
 
 func (n *Node) publishDeviceData(ctx context.Context, deviceID string, metrics []*pb.Payload_Metric) error {
 	n.mu.Lock()
-	if !n.born {
+	if n.closed || !n.born {
 		n.mu.Unlock()
-		return ErrNoBirth
+		return n.noBirth()
 	}
 	if err := n.templates.Check(metrics, false); err != nil {
 		n.mu.Unlock()
@@ -654,9 +676,9 @@ func (n *Node) PublishDeviceDeath(ctx context.Context, deviceID string) error {
 
 func (n *Node) publishDeviceDeath(ctx context.Context, deviceID string) error {
 	n.mu.Lock()
-	if !n.born {
+	if n.closed || !n.born {
 		n.mu.Unlock()
-		return ErrNoBirth
+		return n.noBirth()
 	}
 	if dev, ok := n.devices[deviceID]; ok {
 		dev.Online = false
@@ -685,9 +707,9 @@ func (n *Node) Rebirth(ctx context.Context) error {
 	n.seqMu.Lock()
 	defer n.seqMu.Unlock()
 	n.mu.Lock()
-	if n.state != Online {
+	if n.closed || n.state != Online {
 		n.mu.Unlock()
-		return ErrNotConnected
+		return n.notConnected()
 	}
 	if !n.born {
 		n.mu.Unlock()
@@ -754,9 +776,20 @@ func (n *Node) Disconnect(ctx context.Context) error {
 
 // Close disconnects the node, as Disconnect does, and closes it: Connect
 // then returns ErrClosed, and a Connect in progress, a walk to another server
-// included, ends with ErrClosed and leaves no connection up. Close is safe
-// to call more than once and from several goroutines: the first call closes
-// the node, the others return nil at once.
+// included, ends with ErrClosed and leaves no connection up. The other
+// operations return an error that matches ErrClosed, and ErrNotConnected or
+// ErrNoBirth; Disconnect returns nil.
+//
+// Close returns once the goroutines the node started have ended: a rebirth
+// an NCMD asked for, whose publishes end with Close, and a walk to another
+// server, which publishes its NDEATH first. Called from a callback that such
+// a goroutine runs (OnState during a walk), Close does not wait for that
+// one, which ends after the callback. A callback the transport is running
+// when Close is called (OnNodeCmd, OnDeviceCmd) may finish after Close has
+// returned.
+//
+// Close is safe to call more than once and from several goroutines: the
+// first call closes the node, the others return nil at once.
 func (n *Node) Close(ctx context.Context) error {
 	n.mu.Lock()
 	if n.closed {
@@ -765,14 +798,33 @@ func (n *Node) Close(ctx context.Context) error {
 	}
 	n.closed = true
 	n.mu.Unlock()
+	n.stop()
 
 	err := n.Disconnect(ctx)
 	n.mu.Lock()
 	n.setState(Closed)
-	close(n.closeCh)
 	n.mu.Unlock()
 	n.notify()
+	n.owned.Wait()
 	return err
+}
+
+// notConnected returns the error of an operation that needs the node
+// online. Called with n.mu held.
+func (n *Node) notConnected() error {
+	if n.closed {
+		return errClosedNotConnected
+	}
+	return ErrNotConnected
+}
+
+// noBirth returns the error of an operation that needs the NBIRTH of the
+// connection. Called with n.mu held.
+func (n *Node) noBirth() error {
+	if n.closed {
+		return errClosedNoBirth
+	}
+	return ErrNoBirth
 }
 
 func (n *Node) State() State {
@@ -876,11 +928,13 @@ func (n *Node) publish(ctx context.Context, mt topic.MessageType, deviceID strin
 	n.pubMu.RLock()
 	defer n.pubMu.RUnlock()
 	n.mu.Lock()
-	online := n.state == Online
+	if n.closed || n.state != Online {
+		err = n.notConnected()
+	}
 	n.mu.Unlock()
-	if !online {
+	if err != nil {
 		n.unpublished(mt, p)
-		return ErrNotConnected
+		return err
 	}
 	if err := ctx.Err(); err != nil {
 		n.unpublished(mt, p)
@@ -1083,18 +1137,26 @@ func (n *Node) isRebirthMetric(m *pb.Payload_Metric) bool {
 }
 
 // startRebirth runs Rebirth on a goroutine of its own, unless one is
-// pending: requests that arrive meanwhile are served by it.
+// pending: requests that arrive meanwhile are served by it. Close ends its
+// publishes and waits for it; none starts once Close was called.
 func (n *Node) startRebirth() {
 	n.rebirthMu.Lock()
 	defer n.rebirthMu.Unlock()
 	if n.rebirthPending {
 		return
 	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.closed {
+		return
+	}
 	n.rebirthPending = true
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	n.owned.Go(func() {
+		ctx, cancel := context.WithTimeout(n.life, 10*time.Second)
 		defer cancel()
 		switch err := n.Rebirth(ctx); {
+		case errors.Is(err, ErrClosed) || n.life.Err() != nil:
+			// Close was called: the session ends, and its rebirth with it.
 		case errors.Is(err, ErrNoBirth):
 			// The program's NBIRTH of this connection is still to come, and
 			// it is the birth the request asks for.
@@ -1105,7 +1167,7 @@ func (n *Node) startRebirth() {
 		n.rebirthMu.Lock()
 		n.rebirthPending = false
 		n.rebirthMu.Unlock()
-	}()
+	})
 }
 
 type statePayload struct {
@@ -1121,7 +1183,6 @@ func (n *Node) handleState(topicStr string, data []byte) {
 	}
 
 	n.mu.Lock()
-	walk := false
 	switch {
 	case sp.Online:
 		// The last online STATE received counts, not the highest timestamp
@@ -1136,16 +1197,13 @@ func (n *Node) handleState(topicStr string, data []byte) {
 	// from this server and starts over on the next one of its list (the same
 	// one when it has only one), unless the offline STATE is older than the
 	// last online one: that is the end of an earlier session of the host.
-	case n.state == Online && sp.Timestamp >= n.hostOnlineTS && !n.walking:
+	// Close waits for the walk; none starts once Close was called.
+	case n.state == Online && sp.Timestamp >= n.hostOnlineTS && !n.walking && !n.closed:
 		n.walking = true
-		walk = true
+		n.owned.Go(n.walkServers)
 	}
 	n.mu.Unlock()
 	n.notify()
-
-	if walk {
-		go n.walkServers()
-	}
 }
 
 func (n *Node) brokerURL() string {
@@ -1162,7 +1220,10 @@ func (n *Node) walkServers() {
 		n.mu.Unlock()
 	}()
 
-	// An intentional disconnect: NDEATH first, then DISCONNECT.
+	// An intentional disconnect: NDEATH first, then DISCONNECT. Not ended by
+	// Close, which waits for it: a DISCONNECT without the NDEATH before it
+	// would make the broker discard the will, and no host would learn that
+	// the session ended.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	_ = n.Disconnect(ctx)
 	cancel()
@@ -1184,7 +1245,7 @@ func (n *Node) walkServers() {
 		n.cfg.Logger.Infof("walking to server %s (attempt %d)", url, attempt)
 
 		start := time.Now()
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(n.life, 30*time.Second)
 		err := n.Connect(ctx)
 		cancel()
 		if errors.Is(err, ErrAlreadyConnected) {
@@ -1207,7 +1268,7 @@ func (n *Node) walkServers() {
 		n.cfg.Logger.Infof("retrying in %v", wait)
 		select {
 		case <-time.After(wait):
-		case <-n.closeCh:
+		case <-n.life.Done():
 			return
 		}
 	}

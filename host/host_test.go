@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/otfabric/go-sparkplugb/mqtt"
@@ -1071,117 +1072,129 @@ func TestHostBrokerURLTakesPrecedence(t *testing.T) {
 }
 
 func TestHostReorderTimeout(t *testing.T) {
-	tr := newMockTransport()
-	cfg := testConfig()
-	cfg.ReorderTimeout = 50 * time.Millisecond
-	app, _ := New(tr, cfg)
-	ctx := context.Background()
-	_ = app.Connect(ctx)
+	synctest.Test(t, func(t *testing.T) {
+		tr := newMockTransport()
+		cfg := testConfig()
+		cfg.ReorderTimeout = 50 * time.Millisecond
+		app, _ := New(tr, cfg)
+		ctx := context.Background()
+		_ = app.Connect(ctx)
+		defer app.Close(ctx)
 
-	// NBIRTH
-	bdSeq := payload.BdSeqMetric(0)
-	p := payload.NewPayload(0, bdSeq)
-	b, _ := payload.Encode(p)
-	tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NBIRTH, EdgeNodeID: "n1"}.String(), b)
+		// NBIRTH
+		bdSeq := payload.BdSeqMetric(0)
+		p := payload.NewPayload(0, bdSeq)
+		b, _ := payload.Encode(p)
+		tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NBIRTH, EdgeNodeID: "n1"}.String(), b)
 
-	// Send seq=5 (gap from 0) — should start timer, not immediately rebirth
-	m, _ := payload.NewMetric("x", pb.DataType_Int32, int32(1))
-	p5 := payload.NewPayload(5, m)
-	b5, _ := payload.Encode(p5)
-	pubCountBefore := len(tr.getPublished())
-	tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NDATA, EdgeNodeID: "n1"}.String(), b5)
+		// Send seq=5 (gap from 0) — should start timer, not immediately rebirth
+		m, _ := payload.NewMetric("x", pb.DataType_Int32, int32(1))
+		p5 := payload.NewPayload(5, m)
+		b5, _ := payload.Encode(p5)
+		pubCountBefore := len(tr.getPublished())
+		tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NDATA, EdgeNodeID: "n1"}.String(), b5)
 
-	// No immediate rebirth
-	time.Sleep(10 * time.Millisecond)
-	pubCountAfter := len(tr.getPublished())
-	if pubCountAfter != pubCountBefore {
-		t.Error("rebirth should not be sent immediately with ReorderTimeout")
-	}
-
-	// Wait for timer to fire
-	time.Sleep(100 * time.Millisecond)
-	msgs := tr.getPublished()
-	var rebirthFound bool
-	for _, msg := range msgs[pubCountBefore:] {
-		if msg.Topic == "spBv1.0/g1/NCMD/n1" {
-			rebirthFound = true
+		// No immediate rebirth
+		synctest.Wait()
+		pubCountAfter := len(tr.getPublished())
+		if pubCountAfter != pubCountBefore {
+			t.Error("rebirth should not be sent immediately with ReorderTimeout")
 		}
-	}
-	if !rebirthFound {
-		t.Error("rebirth should be sent after ReorderTimeout expires")
-	}
+
+		// Wait for timer to fire
+		time.Sleep(cfg.ReorderTimeout) // the clock of the bubble
+		synctest.Wait()
+		msgs := tr.getPublished()
+		var rebirthFound bool
+		for _, msg := range msgs[pubCountBefore:] {
+			if msg.Topic == "spBv1.0/g1/NCMD/n1" {
+				rebirthFound = true
+			}
+		}
+		if !rebirthFound {
+			t.Error("rebirth should be sent after ReorderTimeout expires")
+		}
+	})
 }
 
 func TestHostReorderTimeoutCancelledByCorrectSeq(t *testing.T) {
-	tr := newMockTransport()
-	cfg := testConfig()
-	cfg.ReorderTimeout = 200 * time.Millisecond
-	app, _ := New(tr, cfg)
-	ctx := context.Background()
-	_ = app.Connect(ctx)
+	synctest.Test(t, func(t *testing.T) {
+		tr := newMockTransport()
+		cfg := testConfig()
+		cfg.ReorderTimeout = 200 * time.Millisecond
+		app, _ := New(tr, cfg)
+		ctx := context.Background()
+		_ = app.Connect(ctx)
+		defer app.Close(ctx)
 
-	// NBIRTH
-	bdSeq := payload.BdSeqMetric(0)
-	p := payload.NewPayload(0, bdSeq)
-	b, _ := payload.Encode(p)
-	tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NBIRTH, EdgeNodeID: "n1"}.String(), b)
+		// NBIRTH
+		bdSeq := payload.BdSeqMetric(0)
+		p := payload.NewPayload(0, bdSeq)
+		b, _ := payload.Encode(p)
+		tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NBIRTH, EdgeNodeID: "n1"}.String(), b)
 
-	// Send seq=5 (gap) — starts reorder timer
-	m, _ := payload.NewMetric("x", pb.DataType_Int32, int32(1))
-	p5 := payload.NewPayload(5, m)
-	b5, _ := payload.Encode(p5)
-	tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NDATA, EdgeNodeID: "n1"}.String(), b5)
+		// Send seq=5 (gap) — starts reorder timer
+		m, _ := payload.NewMetric("x", pb.DataType_Int32, int32(1))
+		p5 := payload.NewPayload(5, m)
+		b5, _ := payload.Encode(p5)
+		tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NDATA, EdgeNodeID: "n1"}.String(), b5)
 
-	// Send correct seq=1 — should cancel the timer
-	p1 := payload.NewPayload(1, m)
-	b1, _ := payload.Encode(p1)
-	pubCountBefore := len(tr.getPublished())
-	tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NDATA, EdgeNodeID: "n1"}.String(), b1)
+		// Send correct seq=1 — should cancel the timer
+		p1 := payload.NewPayload(1, m)
+		b1, _ := payload.Encode(p1)
+		pubCountBefore := len(tr.getPublished())
+		tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NDATA, EdgeNodeID: "n1"}.String(), b1)
 
-	// Wait past the timeout — no rebirth should fire
-	time.Sleep(300 * time.Millisecond)
-	msgs := tr.getPublished()
-	for _, msg := range msgs[pubCountBefore:] {
-		if msg.Topic == "spBv1.0/g1/NCMD/n1" {
-			t.Error("rebirth should NOT be sent when correct seq cancels reorder timer")
+		// Wait past the timeout — no rebirth should fire
+		time.Sleep(300 * time.Millisecond) // the clock of the bubble
+		synctest.Wait()
+		msgs := tr.getPublished()
+		for _, msg := range msgs[pubCountBefore:] {
+			if msg.Topic == "spBv1.0/g1/NCMD/n1" {
+				t.Error("rebirth should NOT be sent when correct seq cancels reorder timer")
+			}
 		}
-	}
+	})
 }
 
 func TestHostReorderTimeoutCancelledByRebirth(t *testing.T) {
-	tr := newMockTransport()
-	cfg := testConfig()
-	cfg.ReorderTimeout = 200 * time.Millisecond
-	app, _ := New(tr, cfg)
-	ctx := context.Background()
-	_ = app.Connect(ctx)
+	synctest.Test(t, func(t *testing.T) {
+		tr := newMockTransport()
+		cfg := testConfig()
+		cfg.ReorderTimeout = 200 * time.Millisecond
+		app, _ := New(tr, cfg)
+		ctx := context.Background()
+		_ = app.Connect(ctx)
+		defer app.Close(ctx)
 
-	// NBIRTH
-	bdSeq := payload.BdSeqMetric(0)
-	p := payload.NewPayload(0, bdSeq)
-	b, _ := payload.Encode(p)
-	tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NBIRTH, EdgeNodeID: "n1"}.String(), b)
+		// NBIRTH
+		bdSeq := payload.BdSeqMetric(0)
+		p := payload.NewPayload(0, bdSeq)
+		b, _ := payload.Encode(p)
+		tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NBIRTH, EdgeNodeID: "n1"}.String(), b)
 
-	// Send seq gap
-	m, _ := payload.NewMetric("x", pb.DataType_Int32, int32(1))
-	p5 := payload.NewPayload(5, m)
-	b5, _ := payload.Encode(p5)
-	tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NDATA, EdgeNodeID: "n1"}.String(), b5)
+		// Send seq gap
+		m, _ := payload.NewMetric("x", pb.DataType_Int32, int32(1))
+		p5 := payload.NewPayload(5, m)
+		b5, _ := payload.Encode(p5)
+		tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NDATA, EdgeNodeID: "n1"}.String(), b5)
 
-	// New NBIRTH (rebirth) — should cancel timer
-	bdSeq2 := payload.BdSeqMetric(1)
-	p2 := payload.NewPayload(0, bdSeq2)
-	b2, _ := payload.Encode(p2)
-	pubCountBefore := len(tr.getPublished())
-	tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NBIRTH, EdgeNodeID: "n1"}.String(), b2)
+		// New NBIRTH (rebirth) — should cancel timer
+		bdSeq2 := payload.BdSeqMetric(1)
+		p2 := payload.NewPayload(0, bdSeq2)
+		b2, _ := payload.Encode(p2)
+		pubCountBefore := len(tr.getPublished())
+		tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NBIRTH, EdgeNodeID: "n1"}.String(), b2)
 
-	time.Sleep(300 * time.Millisecond)
-	msgs := tr.getPublished()
-	for _, msg := range msgs[pubCountBefore:] {
-		if msg.Topic == "spBv1.0/g1/NCMD/n1" {
-			t.Error("rebirth request should NOT fire after node re-birthed")
+		time.Sleep(300 * time.Millisecond) // the clock of the bubble
+		synctest.Wait()
+		msgs := tr.getPublished()
+		for _, msg := range msgs[pubCountBefore:] {
+			if msg.Topic == "spBv1.0/g1/NCMD/n1" {
+				t.Error("rebirth request should NOT fire after node re-birthed")
+			}
 		}
-	}
+	})
 }
 
 func strPtr(s string) *string      { return &s }
@@ -1198,7 +1211,7 @@ func TestHostConnectionLost(t *testing.T) {
 		t.Fatal(err)
 	}
 	app.mu.Lock()
-	app.reorderTimers["g/n"] = time.AfterFunc(time.Hour, func() {})
+	app.reorderTimers["g/n"] = app.owned.AfterFunc(time.Hour, func() {})
 	app.mu.Unlock()
 
 	tr.opts.OnConnectionLost(mqtt.ErrConnectionLost)
@@ -1259,20 +1272,21 @@ func TestHostAliasDataKeepsBirthNameAndDatatype(t *testing.T) {
 }
 
 func TestHostRequestsRebirthFromUnknownNode(t *testing.T) {
-	tr := newMockTransport()
-	app, _ := New(tr, testConfig())
-	_ = app.Connect(context.Background())
+	synctest.Test(t, func(t *testing.T) {
+		tr := newMockTransport()
+		app, _ := New(tr, testConfig())
+		_ = app.Connect(context.Background())
+		defer app.Close(context.Background())
 
-	m, _ := payload.NewMetric("x", pb.DataType_Int32, int32(1))
-	b, _ := payload.Encode(payload.NewPayload(1, m))
-	dbirth := topic.Topic{GroupID: "g1", Type: topic.DBIRTH, EdgeNodeID: "n1", DeviceID: "d1"}.String()
-	// A DBIRTH before any NBIRTH, twice: one rebirth request.
-	tr.deliverToAll(dbirth, b)
-	tr.deliverToAll(dbirth, b)
+		m, _ := payload.NewMetric("x", pb.DataType_Int32, int32(1))
+		b, _ := payload.Encode(payload.NewPayload(1, m))
+		dbirth := topic.Topic{GroupID: "g1", Type: topic.DBIRTH, EdgeNodeID: "n1", DeviceID: "d1"}.String()
+		// A DBIRTH before any NBIRTH, twice: one rebirth request.
+		tr.deliverToAll(dbirth, b)
+		tr.deliverToAll(dbirth, b)
 
-	ncmd := topic.ForNCMD("g1", "n1")
-	deadline := time.Now().Add(2 * time.Second)
-	for {
+		ncmd := topic.ForNCMD("g1", "n1")
+		synctest.Wait() // the rebirth requests
 		var reqs int
 		for _, p := range tr.getPublished() {
 			if p.Topic == ncmd {
@@ -1283,104 +1297,98 @@ func TestHostRequestsRebirthFromUnknownNode(t *testing.T) {
 				}
 			}
 		}
-		if reqs == 1 {
-			time.Sleep(50 * time.Millisecond)
-			break
-		}
-		if reqs > 1 || time.Now().After(deadline) {
+		if reqs != 1 {
 			t.Fatalf("%d rebirth requests, want 1", reqs)
 		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if app.GetNode("g1", "n1") != nil {
-		t.Error("a node without NBIRTH must stay unknown")
-	}
+		if app.GetNode("g1", "n1") != nil {
+			t.Error("a node without NBIRTH must stay unknown")
+		}
+	})
 }
 
 func TestHostThrottlesSeqGapRebirths(t *testing.T) {
-	tr := newMockTransport()
-	app, _ := New(tr, testConfig())
-	_ = app.Connect(context.Background())
+	synctest.Test(t, func(t *testing.T) {
+		tr := newMockTransport()
+		app, _ := New(tr, testConfig())
+		_ = app.Connect(context.Background())
+		defer app.Close(context.Background())
 
-	m, _ := payload.NewMetric("x", pb.DataType_Int32, int32(1))
-	enc := func(seq uint64, ms ...*pb.Payload_Metric) []byte {
-		b, _ := payload.Encode(payload.NewPayload(seq, ms...))
-		return b
-	}
-	tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NBIRTH, EdgeNodeID: "n1"}.String(), enc(0, payload.BdSeqMetric(0), m))
-	// Several messages out of sequence in a row, as a broker that reorders
-	// across topics delivers them: one rebirth request, not one each.
-	for seq := uint64(5); seq < 10; seq++ {
-		tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NDATA, EdgeNodeID: "n1"}.String(), enc(seq, m))
-	}
+		m, _ := payload.NewMetric("x", pb.DataType_Int32, int32(1))
+		enc := func(seq uint64, ms ...*pb.Payload_Metric) []byte {
+			b, _ := payload.Encode(payload.NewPayload(seq, ms...))
+			return b
+		}
+		tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NBIRTH, EdgeNodeID: "n1"}.String(), enc(0, payload.BdSeqMetric(0), m))
+		// Several messages out of sequence in a row, as a broker that reorders
+		// across topics delivers them: one rebirth request, not one each.
+		for seq := uint64(5); seq < 10; seq++ {
+			tr.deliverToAll(topic.Topic{GroupID: "g1", Type: topic.NDATA, EdgeNodeID: "n1"}.String(), enc(seq, m))
+		}
 
-	ncmd := topic.ForNCMD("g1", "n1")
-	expect := func(want int) {
-		t.Helper()
-		deadline := time.Now().Add(2 * time.Second)
-		for {
+		ncmd := topic.ForNCMD("g1", "n1")
+		expect := func(want int) {
+			t.Helper()
+			synctest.Wait() // the rebirth requests
 			var reqs int
 			for _, p := range tr.getPublished() {
 				if p.Topic == ncmd {
 					reqs++
 				}
 			}
-			if reqs == want {
-				time.Sleep(50 * time.Millisecond)
-				return
-			}
-			if reqs > want || time.Now().After(deadline) {
+			if reqs != want {
 				t.Fatalf("%d rebirth requests, want %d", reqs, want)
 			}
-			time.Sleep(10 * time.Millisecond)
 		}
-	}
-	expect(1)
-	// The NBIRTH answers the request; the messages throttled while it was
-	// pending may have been of this new session: one more request.
-	nbirth := topic.Topic{GroupID: "g1", Type: topic.NBIRTH, EdgeNodeID: "n1"}.String()
-	tr.deliverToAll(nbirth, enc(0, payload.BdSeqMetric(1), m))
-	expect(2)
-	// Nothing was throttled since: no further request.
-	tr.deliverToAll(nbirth, enc(0, payload.BdSeqMetric(2), m))
-	expect(2)
+		expect(1)
+		// The NBIRTH answers the request; the messages throttled while it was
+		// pending may have been of this new session: one more request.
+		nbirth := topic.Topic{GroupID: "g1", Type: topic.NBIRTH, EdgeNodeID: "n1"}.String()
+		tr.deliverToAll(nbirth, enc(0, payload.BdSeqMetric(1), m))
+		expect(2)
+		// Nothing was throttled since: no further request.
+		tr.deliverToAll(nbirth, enc(0, payload.BdSeqMetric(2), m))
+		expect(2)
+	})
 }
 
 func TestHostAppliesNextSessionDBIRTHBeforeNBIRTH(t *testing.T) {
-	tr := newMockTransport()
-	app, _ := New(tr, testConfig())
-	_ = app.Connect(context.Background())
+	synctest.Test(t, func(t *testing.T) {
+		tr := newMockTransport()
+		app, _ := New(tr, testConfig())
+		_ = app.Connect(context.Background())
+		defer app.Close(context.Background())
 
-	m, _ := payload.NewMetric("x", pb.DataType_Int32, int32(1))
-	enc := func(seq uint64, ms ...*pb.Payload_Metric) []byte {
-		p := payload.NewPayload(seq, ms...)
-		ts := uint64(1000) // messages of a session: not in reverse of their publishing
-		p.Timestamp = &ts
-		b, _ := payload.Encode(p)
-		return b
-	}
-	tp := func(mt topic.MessageType, dev string) string {
-		return topic.Topic{GroupID: "g1", Type: mt, EdgeNodeID: "n1", DeviceID: dev}.String()
-	}
-	tr.deliverToAll(tp(topic.NBIRTH, ""), enc(0, payload.BdSeqMetric(0), m))
-	for seq := uint64(1); seq <= 5; seq++ {
-		tr.deliverToAll(tp(topic.NDATA, ""), enc(seq, m))
-	}
-	// The node restarts; the broker delivers the DBIRTH of the new session
-	// (seq 1, behind the current session's 6) before its NBIRTH.
-	tr.deliverToAll(tp(topic.DBIRTH, "d1"), enc(1, m))
-	tr.deliverToAll(tp(topic.NBIRTH, ""), enc(0, payload.BdSeqMetric(1), m))
-
-	ns := app.GetNode("g1", "n1")
-	if ns == nil || ns.BdSeq != 1 || ns.Devices["d1"] == nil || !ns.Devices["d1"].Online {
-		t.Fatalf("node %+v: want the new session with device d1 online", ns)
-	}
-	time.Sleep(50 * time.Millisecond)
-	for _, p := range tr.getPublished() {
-		if p.Topic == topic.ForNCMD("g1", "n1") {
-			t.Fatal("rebirth requested for a message of the next session")
+		m, _ := payload.NewMetric("x", pb.DataType_Int32, int32(1))
+		enc := func(seq uint64, ms ...*pb.Payload_Metric) []byte {
+			p := payload.NewPayload(seq, ms...)
+			ts := uint64(1000) // messages of a session: not in reverse of their publishing
+			p.Timestamp = &ts
+			b, _ := payload.Encode(p)
+			return b
 		}
-	}
+		tp := func(mt topic.MessageType, dev string) string {
+			return topic.Topic{GroupID: "g1", Type: mt, EdgeNodeID: "n1", DeviceID: dev}.String()
+		}
+		tr.deliverToAll(tp(topic.NBIRTH, ""), enc(0, payload.BdSeqMetric(0), m))
+		for seq := uint64(1); seq <= 5; seq++ {
+			tr.deliverToAll(tp(topic.NDATA, ""), enc(seq, m))
+		}
+		// The node restarts; the broker delivers the DBIRTH of the new session
+		// (seq 1, behind the current session's 6) before its NBIRTH.
+		tr.deliverToAll(tp(topic.DBIRTH, "d1"), enc(1, m))
+		tr.deliverToAll(tp(topic.NBIRTH, ""), enc(0, payload.BdSeqMetric(1), m))
+
+		ns := app.GetNode("g1", "n1")
+		if ns == nil || ns.BdSeq != 1 || ns.Devices["d1"] == nil || !ns.Devices["d1"].Online {
+			t.Fatalf("node %+v: want the new session with device d1 online", ns)
+		}
+		synctest.Wait() // the rebirth requests, were there any
+		for _, p := range tr.getPublished() {
+			if p.Topic == topic.ForNCMD("g1", "n1") {
+				t.Fatal("rebirth requested for a message of the next session")
+			}
+		}
+	})
 }
 
 func TestHostAppliesReorderedMessagesInSequence(t *testing.T) {

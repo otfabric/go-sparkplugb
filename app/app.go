@@ -17,6 +17,7 @@ import (
 
 	sparkplugb "github.com/otfabric/go-sparkplugb"
 	"github.com/otfabric/go-sparkplugb/internal/callback"
+	"github.com/otfabric/go-sparkplugb/internal/routine"
 	"github.com/otfabric/go-sparkplugb/mqtt"
 	"github.com/otfabric/go-sparkplugb/payload"
 	pb "github.com/otfabric/go-sparkplugb/proto"
@@ -25,9 +26,17 @@ import (
 )
 
 var (
+	// ErrClosed is returned by Connect on an application that Close was
+	// called on, and by a Connect that Close overtook. After Close the
+	// commands return an error that matches ErrClosed and ErrNotConnected.
 	ErrClosed       = errors.New("sparkplugb: application closed")
 	ErrNotConnected = errors.New("sparkplugb: application not connected")
 )
+
+// errClosedNotConnected is what the commands return once Close was called:
+// it matches ErrClosed, and ErrNotConnected, which they return while the
+// application is open and not connected.
+var errClosedNotConnected = fmt.Errorf("%w: %w", ErrClosed, ErrNotConnected)
 
 type State uint8
 
@@ -143,7 +152,6 @@ type Application struct {
 	state       State
 	closed      bool // Close was called: Connect refuses, and one in progress ends with ErrClosed
 	nodes       map[string]*EdgeNodeState
-	closeCh     chan struct{}
 	transitions callback.Queue[transition] // state transitions not yet delivered (notify)
 
 	rebirthAsked  map[string]time.Time            // nodeKey -> last rebirth request the application made itself
@@ -152,16 +160,23 @@ type Application struct {
 	held          map[string][]heldMsg            // nodeKey -> messages ahead of their sequence
 	sessions      map[string]*session             // nodeKey -> current session
 	templates     map[string]payload.TemplateDefs // nodeKey -> template definitions of the NBIRTH
-	sessionTimers map[string]*time.Timer          // nodeKey -> pending wait for an NBIRTH
+	sessionTimers map[string]*routine.Timer       // nodeKey -> pending wait for an NBIRTH
 	sessionWait   time.Duration                   // sessionWait, shorter in tests
 	lateBirthWait time.Duration                   // lateBirthWait, shorter in tests
 
-	heldCount        int         // messages in held, over every node
-	heldBytes        int         // their payload bytes
-	heldDropped      uint64      // held messages dropped for maxHeldTotal and maxHeldBytes
-	lastSweep        time.Time   // when sweep last ran
-	sweepTimer       *time.Timer // pending sweep of the held messages (armSweep)
-	rebirthsInFlight int         // rebirth requests being sent (askRebirth)
+	heldCount        int            // messages in held, over every node
+	heldBytes        int            // their payload bytes
+	heldDropped      uint64         // held messages dropped for maxHeldTotal and maxHeldBytes
+	lastSweep        time.Time      // when sweep last ran
+	sweepTimer       *routine.Timer // pending sweep of the held messages (armSweep)
+	rebirthsInFlight int            // rebirth requests being sent (askRebirth)
+
+	// life ends when Close is called (stop): the rebirth requests on their
+	// way are sent with it, so that Close ends them, and owned has them and
+	// the timers, so that Close waits for them.
+	life  context.Context
+	stop  context.CancelFunc
+	owned routine.Group
 }
 
 // transition is a change of the application's state, for StateHandler.
@@ -185,11 +200,13 @@ func New(transport mqtt.Transport, cfg Config) (*Application, error) {
 	}
 	cfg.Logger = callback.Logger(sparkplugb.ComponentLogger(cfg.Logger, "app"))
 
+	life, stop := context.WithCancel(context.Background())
 	return &Application{
 		cfg:       cfg,
 		transport: transport,
 		nodes:     make(map[string]*EdgeNodeState),
-		closeCh:   make(chan struct{}),
+		life:      life,
+		stop:      stop,
 
 		sessionWait:   sessionWait,
 		lateBirthWait: lateBirthWait,
@@ -307,9 +324,17 @@ func (a *Application) Disconnect(ctx context.Context) error {
 
 // Close disconnects the application, as Disconnect does, and closes it:
 // Connect then returns ErrClosed, and a Connect in progress ends with
-// ErrClosed and leaves no connection up. Close is safe to call more than
-// once and from several goroutines: the first call closes the application,
-// the others return nil at once.
+// ErrClosed and leaves no connection up. The commands return an error that
+// matches ErrClosed and ErrNotConnected; Disconnect returns nil.
+//
+// Close returns once the goroutines the application started have ended:
+// the rebirth requests on their way, which end with Close, and the timers
+// of the application, which it stops. A callback the transport is running
+// when Close is called (OnNodeData, say) may finish after Close has
+// returned.
+//
+// Close is safe to call more than once and from several goroutines: the
+// first call closes the application, the others return nil at once.
 func (a *Application) Close(ctx context.Context) error {
 	a.mu.Lock()
 	if a.closed {
@@ -322,18 +347,24 @@ func (a *Application) Close(ctx context.Context) error {
 		a.sweepTimer = nil
 	}
 	a.mu.Unlock()
+	a.stop()
 
 	err := a.Disconnect(ctx)
 	a.mu.Lock()
 	a.setState(Closed)
-	close(a.closeCh)
+	a.stopSessionTimers() // also those armed after the connection was lost
 	a.mu.Unlock()
 	a.notify()
+	a.owned.Wait()
 	return err
 }
 
 func (a *Application) SendNodeCommand(ctx context.Context, groupID, nodeID string, metrics []*pb.Payload_Metric) error {
 	a.mu.RLock()
+	if a.closed {
+		a.mu.RUnlock()
+		return errClosedNotConnected
+	}
 	if a.state != Connected {
 		a.mu.RUnlock()
 		return ErrNotConnected
@@ -360,6 +391,10 @@ func (a *Application) SendNodeCommand(ctx context.Context, groupID, nodeID strin
 
 func (a *Application) SendDeviceCommand(ctx context.Context, groupID, nodeID, deviceID string, metrics []*pb.Payload_Metric) error {
 	a.mu.RLock()
+	if a.closed {
+		a.mu.RUnlock()
+		return errClosedNotConnected
+	}
 	if a.state != Connected {
 		a.mu.RUnlock()
 		return ErrNotConnected
@@ -575,17 +610,18 @@ func (a *Application) hold(t topic.Topic, data []byte) bool {
 		return false // the handler reports it
 	}
 	checks := a.sessionChecks(t)
-	held, dropped := a.holdLocked(t, data, p.GetSeq(), p.GetTimestamp(), checks)
+	held, dropped, trimmed := a.holdLocked(t, data, p.GetSeq(), p.GetTimestamp(), checks)
 	if dropped {
 		a.sessionDropped([]topic.Topic{t})
 	}
+	a.heldDrops(trimmed)
 	return held
 }
 
 // holdLocked is hold once the message is decoded. It reports whether the
 // message is held or dropped, and whether it was dropped as of a session that
-// has ended.
-func (a *Application) holdLocked(t topic.Topic, data []byte, seq, ts uint64, checks sparkplugb.SessionChecks) (held, dropped bool) {
+// has ended, and returns the held messages it dropped to make room for it.
+func (a *Application) holdLocked(t topic.Topic, data []byte, seq, ts uint64, checks sparkplugb.SessionChecks) (held, dropped bool, trimmed []topic.Topic) {
 	key := nodeKey(t.GroupID, t.EdgeNodeID)
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -599,22 +635,22 @@ func (a *Application) holdLocked(t topic.Topic, data []byte, seq, ts uint64, che
 			if checks&sparkplugb.CheckOlderInSequence != 0 && isData(t.Type) && a.superseded(key, ts) {
 				a.cfg.Logger.Debugf("%s: dropped %s, seq %d: in sequence, published before the NBIRTH (CheckOlderInSequence)",
 					logNode(t), t.Type, seq)
-				return true, true
+				return true, true, nil
 			}
 			a.sessions[key].remember(heldMsg{t: t, seq: seq, data: data, ts: ts})
-			return false, false
+			return false, false, nil
 		}
 		if a.superseded(key, ts) {
 			a.cfg.Logger.Debugf("%s: dropped %s, seq %d: published before the NBIRTH",
 				logNode(t), t.Type, seq)
-			return true, true
+			return true, true, nil
 		}
 		behind = (seq-expected+256)%256 > 128
 	}
 	if len(a.held[key]) >= maxHeld || len(data) > maxHeldBytes {
-		return false, false
+		return false, false, nil
 	}
-	a.trimHeld(1, len(data))
+	trimmed = a.trimHeld(1, len(data))
 	a.setHeld(key, append(a.held[key], heldMsg{t: t, seq: seq, data: data, ts: ts, at: now, nextSession: behind}))
 	switch {
 	case behind:
@@ -624,7 +660,7 @@ func (a *Application) holdLocked(t topic.Topic, data []byte, seq, ts uint64, che
 	default:
 		a.validateSeq(ns, seq, t) // starts the reorder timer or requests a rebirth
 	}
-	return true, false
+	return true, false, trimmed
 }
 
 // isData reports whether a message of type mt is NDATA or DDATA, the only
@@ -656,6 +692,22 @@ func (a *Application) sessionDropped(ts []topic.Topic) {
 	}
 	for _, t := range ts {
 		callback.Run(a.cfg.Logger, "Metrics.OnSessionDrop", func() { m.OnSessionDrop(t.GroupID, t.EdgeNodeID, t.Type.String()) })
+	}
+}
+
+// heldDrops reports the held messages dropped to keep the held messages
+// within maxHeldTotal and maxHeldBytes to the Metrics, when they implement
+// sparkplugb.HeldDropMetrics. Called with none of the runtime's locks held.
+func (a *Application) heldDrops(ts []topic.Topic) {
+	if len(ts) == 0 {
+		return
+	}
+	m, ok := a.cfg.Metrics.(sparkplugb.HeldDropMetrics)
+	if !ok {
+		return
+	}
+	for _, t := range ts {
+		callback.Run(a.cfg.Logger, "Metrics.OnHeldDrop", func() { m.OnHeldDrop(t.GroupID, t.EdgeNodeID, t.Type.String()) })
 	}
 }
 
@@ -695,12 +747,13 @@ func heldSize(msgs []heldMsg) int {
 
 // trimHeld drops the held messages that arrived first, of any edge node,
 // until n more messages of size payload bytes in all fit maxHeldTotal and
-// maxHeldBytes. It sorts the held messages once, however many it drops.
-// Called with a.mu held, size at most maxHeldBytes.
-func (a *Application) trimHeld(n, size int) {
+// maxHeldBytes, and returns the topics of those it dropped, for heldDrops. It
+// sorts the held messages once, however many it drops. Called with a.mu
+// held, size at most maxHeldBytes.
+func (a *Application) trimHeld(n, size int) (dropped []topic.Topic) {
 	fits := func(count, bytes int) bool { return count+n <= maxHeldTotal && bytes+size <= maxHeldBytes }
 	if fits(a.heldCount, a.heldBytes) {
-		return
+		return nil
 	}
 	type ref struct {
 		key string
@@ -735,6 +788,7 @@ func (a *Application) trimHeld(n, size int) {
 		}
 		drop[r.key][r.i] = true
 		a.heldDropped++
+		dropped = append(dropped, m.t)
 		a.cfg.Logger.Debugf("%q: dropped a held %s, seq %d: %d messages, %d bytes held",
 			r.key, m.t.Type, m.seq, count, bytes)
 	}
@@ -748,14 +802,16 @@ func (a *Application) trimHeld(n, size int) {
 		}
 		a.setHeld(key, kept)
 	}
+	return dropped
 }
 
 // rehold holds msgs, applied to the session that an NBIRTH of key just
 // ended, again for the new session, ahead of the messages held for it, within
 // the bounds of every held message: those that would pass maxHeld or
 // maxHeldBytes by themselves are left out, and the oldest held messages make
-// room for the others. Called with a.mu held.
-func (a *Application) rehold(key string, msgs []heldMsg) {
+// room for the others; it returns the topics of those, for heldDrops. Called
+// with a.mu held.
+func (a *Application) rehold(key string, msgs []heldMsg) (trimmed []topic.Topic) {
 	room := maxHeld - len(a.held[key])
 	var ours []heldMsg
 	size := 0
@@ -770,10 +826,11 @@ func (a *Application) rehold(key string, msgs []heldMsg) {
 		size += len(m.data)
 	}
 	if len(ours) == 0 {
-		return
+		return nil
 	}
-	a.trimHeld(len(ours), size)
+	trimmed = a.trimHeld(len(ours), size)
 	a.setHeld(key, append(ours, a.held[key]...)) // on a tie, drain takes the held one
+	return trimmed
 }
 
 // armSweep makes sure a sweep follows when the oldest held message has
@@ -792,7 +849,7 @@ func (a *Application) armSweep() {
 		}
 	}
 	wait := max(time.Until(oldest.Add(heldMaxAge+time.Millisecond)), sweepInterval)
-	a.sweepTimer = time.AfterFunc(wait, a.sweepHeld)
+	a.sweepTimer = a.owned.AfterFunc(wait, a.sweepHeld)
 }
 
 // sweepHeld is the sweep armSweep schedules.
@@ -866,13 +923,13 @@ func (a *Application) superseded(key string, ts uint64) bool {
 // Called with a.mu held.
 func (a *Application) expectSession(t topic.Topic) {
 	key := nodeKey(t.GroupID, t.EdgeNodeID)
-	if _, pending := a.sessionTimers[key]; pending {
-		return
+	if _, pending := a.sessionTimers[key]; pending || a.closed {
+		return // Close stops the timers and waits for them: none is armed after it
 	}
 	if a.sessionTimers == nil {
-		a.sessionTimers = make(map[string]*time.Timer)
+		a.sessionTimers = make(map[string]*routine.Timer)
 	}
-	a.sessionTimers[key] = time.AfterFunc(a.sessionWait, func() {
+	a.sessionTimers[key] = a.owned.AfterFunc(a.sessionWait, func() {
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		if _, pending := a.sessionTimers[key]; !pending {
@@ -1054,6 +1111,7 @@ func (a *Application) handleNBIRTH(t topic.Topic, data []byte) {
 		a.sessions = make(map[string]*session)
 	}
 	birthTS := p.GetTimestamp()
+	var trimmed []topic.Topic
 	if prev := a.sessions[key]; prev != nil && birthTS != 0 {
 		// A message newer than this NBIRTH that the broker delivered before
 		// it, whose seq happened to be the next of the session that just
@@ -1070,7 +1128,7 @@ func (a *Application) handleNBIRTH(t topic.Topic, data []byte) {
 				ours = append(ours, m)
 			}
 		}
-		a.rehold(key, ours)
+		trimmed = a.rehold(key, ours)
 	}
 	a.sessions[key] = &session{birthTS: birthTS, bornAt: time.Now()}
 	a.answeredRebirth(t)
@@ -1098,6 +1156,7 @@ func (a *Application) handleNBIRTH(t topic.Topic, data []byte) {
 	}
 	a.mu.Unlock()
 	a.sessionDropped(dropped)
+	a.heldDrops(trimmed)
 
 	callback.Run(a.cfg.Logger, "Metrics.OnNodeBirth", func() { a.cfg.Metrics.OnNodeBirth(t.GroupID, t.EdgeNodeID) })
 	if a.cfg.OnNodeBirth != nil {
@@ -1441,6 +1500,9 @@ func (a *Application) unknownNode(t topic.Topic) {
 // rebirthInterval, and while fewer than maxRebirthRequests requests are on
 // their way. Called with a.mu held.
 func (a *Application) askRebirth(t topic.Topic, reason string) {
+	if a.closed {
+		return // Close waits for the requests on their way: none starts after it
+	}
 	key := nodeKey(t.GroupID, t.EdgeNodeID)
 	if a.rebirthAsked == nil {
 		a.rebirthAsked = make(map[string]time.Time)
@@ -1460,16 +1522,16 @@ func (a *Application) askRebirth(t topic.Topic, reason string) {
 	a.rebirthAsked[key] = time.Now()
 	a.rebirthsInFlight++
 	a.logWarn("%s: %s — requesting rebirth", logNode(t), reason)
-	go func() {
+	a.owned.Go(func() {
 		defer func() {
 			a.mu.Lock()
 			a.rebirthsInFlight--
 			a.mu.Unlock()
 		}()
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(a.life, 5*time.Second)
 		defer cancel()
 		_ = a.RequestRebirth(ctx, t.GroupID, t.EdgeNodeID)
-	}()
+	})
 }
 
 // maxRebirthRequests bounds the rebirth requests the application sends at

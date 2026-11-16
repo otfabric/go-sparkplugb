@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/otfabric/go-sparkplugb/mqtt"
@@ -1107,28 +1108,31 @@ func TestPrimaryHostGoesOffline(t *testing.T) {
 // TestPrimaryHostStaleOffline checks that an offline STATE older than the
 // last online one is ignored: it ends an earlier session of the host.
 func TestPrimaryHostStaleOffline(t *testing.T) {
-	tr := newMockTransport()
-	cfg := testConfig()
-	cfg.PrimaryHostID = "myHost"
-	n, err := New(tr, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := n.Connect(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	stateTopic := topic.ForState("myHost")
-	b, _ := json.Marshal(statePayload{Online: true, Timestamp: 5})
-	tr.deliver(stateTopic, b)
-	b, _ = json.Marshal(statePayload{Online: false, Timestamp: 4})
-	tr.deliver(stateTopic, b)
-	time.Sleep(20 * time.Millisecond)
-	if n.State() != Online {
-		t.Errorf("state = %s, want online after a stale offline STATE", n.State())
-	}
-	if publishedTo(tr, "spBv1.0/testGroup/NDEATH/testNode") {
-		t.Error("NDEATH after a stale offline STATE")
-	}
+	synctest.Test(t, func(t *testing.T) {
+		tr := newMockTransport()
+		cfg := testConfig()
+		cfg.PrimaryHostID = "myHost"
+		n, err := New(tr, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := n.Connect(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		defer n.Close(context.Background())
+		stateTopic := topic.ForState("myHost")
+		b, _ := json.Marshal(statePayload{Online: true, Timestamp: 5})
+		tr.deliver(stateTopic, b)
+		b, _ = json.Marshal(statePayload{Online: false, Timestamp: 4})
+		tr.deliver(stateTopic, b)
+		synctest.Wait() // a walk to another server, were the STATE taken
+		if n.State() != Online {
+			t.Errorf("state = %s, want online after a stale offline STATE", n.State())
+		}
+		if publishedTo(tr, "spBv1.0/testGroup/NDEATH/testNode") {
+			t.Error("NDEATH after a stale offline STATE")
+		}
+	})
 }
 
 func waitState(t *testing.T, n *Node, want State) {

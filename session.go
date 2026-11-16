@@ -56,3 +56,15 @@ const (
 type SessionDropMetrics interface {
 	OnSessionDrop(groupID, edgeNodeID, messageType string)
 }
+
+// HeldDropMetrics is implemented by the Metrics of a host or application
+// that counts the messages it drops from those it holds for reordering. The
+// held messages are bounded over all edge nodes, at 4096 messages and 8 MiB
+// of payload (SECURITY.md); to make room for the next one, the oldest held
+// message of any edge node is dropped. OnHeldDrop is called for each message
+// so dropped, with its edge node and message type (NDATA, DDATA, DBIRTH or
+// DDEATH), with none of the runtime's locks held. A held message that waited
+// longer than 30 s for the gap before it is dropped without this call.
+type HeldDropMetrics interface {
+	OnHeldDrop(groupID, edgeNodeID, messageType string)
+}
