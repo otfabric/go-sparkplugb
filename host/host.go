@@ -173,6 +173,10 @@ type App struct {
 	life  context.Context
 	stop  context.CancelFunc
 	owned routine.Group
+	// ended ends once Close has disconnected the transport (end): a command
+	// on its way is sent with a context that ends with it (publishCommand).
+	ended context.Context
+	end   context.CancelFunc
 
 	// stateMu keeps the STATE messages of a connection in order: Connect
 	// holds it from its last check for Close to the STATE birth, Disconnect
@@ -210,6 +214,7 @@ func New(transport mqtt.Transport, cfg Config) (*App, error) {
 	cfg.Logger = callback.Logger(sparkplugb.ComponentLogger(cfg.Logger, "host"))
 
 	life, stop := context.WithCancel(context.Background())
+	ended, end := context.WithCancel(context.Background())
 	return &App{
 		cfg:           cfg,
 		transport:     transport,
@@ -219,6 +224,8 @@ func New(transport mqtt.Transport, cfg Config) (*App, error) {
 		lateBirthWait: lateBirthWait,
 		life:          life,
 		stop:          stop,
+		ended:         ended,
+		end:           end,
 	}, nil
 }
 
@@ -377,6 +384,13 @@ func (a *App) Disconnect(ctx context.Context) error {
 // leaves no connection up. The commands return an error that matches
 // ErrClosed and ErrNotConnected; Disconnect returns nil.
 //
+// A command on its way to the transport when Close is called ends with
+// it: once Close has disconnected the transport, the context the transport
+// has for the command ends. An error the transport returns for it comes
+// back wrapped, so that it matches ErrClosed as well as the transport's
+// error (with PahoTransport, mqtt.ErrConnectionLost). Close does not wait
+// for the command.
+//
 // Close returns once the goroutines the host started have ended: the
 // rebirth requests on their way, which end with Close, and the timers of
 // the host, which it stops. A callback the transport is running when Close
@@ -399,6 +413,9 @@ func (a *App) Close(ctx context.Context) error {
 	a.stop()
 
 	err := a.Disconnect(ctx)
+	// After the transport was disconnected: a transport that ends a publish
+	// with the connection returns that error for a command on its way.
+	a.end()
 	a.mu.Lock()
 	a.setState(Closed)
 	a.stopTimers() // also those armed after the connection was lost
@@ -435,7 +452,22 @@ func (a *App) SendNodeCommand(ctx context.Context, groupID, nodeID string, metri
 		EdgeNodeID: nodeID,
 	}.String()
 
-	return a.transport.Publish(ctx, t, 0, false, b)
+	return a.publishCommand(ctx, t, b)
+}
+
+// publishCommand hands a command to the transport, with a context that
+// also ends once Close has disconnected the transport. The error of a
+// command on its way when Close was called matches ErrClosed as well as the
+// transport's error.
+func (a *App) publishCommand(ctx context.Context, t string, b []byte) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	defer context.AfterFunc(a.ended, cancel)()
+	err := a.transport.Publish(ctx, t, 0, false, b)
+	if err != nil && a.life.Err() != nil {
+		return fmt.Errorf("%w: %w", ErrClosed, err)
+	}
+	return err
 }
 
 func (a *App) SendDeviceCommand(ctx context.Context, groupID, nodeID, deviceID string, metrics []*pb.Payload_Metric) error {
@@ -466,7 +498,7 @@ func (a *App) SendDeviceCommand(ctx context.Context, groupID, nodeID, deviceID s
 		DeviceID:   deviceID,
 	}.String()
 
-	return a.transport.Publish(ctx, t, 0, false, b)
+	return a.publishCommand(ctx, t, b)
 }
 
 func (a *App) RequestRebirth(ctx context.Context, groupID, nodeID string) error {

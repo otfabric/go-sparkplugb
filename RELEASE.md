@@ -1,5 +1,32 @@
 # go-sparkplugb Releases
 
+## v0.8.0
+
+**Date:** 2026-11-16
+**Previous release:** v0.7.0
+
+The edge node's device methods check the device ID, an operation on its way to the transport when `Close` is called ends with `Close`, and `edge.Metrics.OnPublish` is called. Nothing is added, removed or changed in the API.
+
+### Breaking
+
+- **`edge`: `PublishDeviceBirth`, `PublishDeviceData` and `PublishDeviceDeath` return `topic.ErrInvalidID` for a device ID that is empty, not valid UTF-8, or contains `/`, `+` or `#`,** and publish nothing and take no `seq`: the rule `edge.New` applies to the group and edge node IDs, and Sparkplug B 3.0.0 to device IDs (tck-id-topics-device-id). Who notices: a program whose device IDs break the rule, whose device messages went out on topics that a host does not parse as that device's, or that a broker refuses. There is no option for the old behaviour: map such IDs to IDs the rule allows before calling the device methods.
+- **`edge`, `host`, `app`: an operation on its way to the transport when `Close` is called ends with `Close`,** as the Close contract of otfabric/engineering asks. The context the transport has for an edge node's publish ends when `Close` is called; the one for a command of `host` and `app` (`SendNodeCommand`, `SendDeviceCommand`, `RequestRebirth`) ends once `Close` has disconnected the transport. An error the transport then returns comes back wrapped, so that it matches `ErrClosed` as well as the transport's error; a transport that returns nil, for a message that went out, makes the call return nil as before. Who notices: a program with a publish or command in flight when it calls `Close`. With `PahoTransport`, such a command returned an error wrapping `mqtt.ErrConnectionLost` and still does, now matching `ErrClosed` too; such an edge publish, which `Close` waited for until the transport returned (up to `PublishTimeout`), returns once Paho has the message in line or has given it up, with an error wrapping `context.Canceled` and matching `ErrClosed`. With a transport that ends a publish with its context only, the publish or command returned only when the caller's context ended, and the edge node's `Close` waited for it. Restore path: the transport's error is wrapped, not replaced, so `errors.Is(err, mqtt.ErrConnectionLost)` and other tests of the transport's error match as before; to have a publish finish on its own terms, let it return before calling `Close`. There is no option for the old behaviour.
+
+### Fixed
+
+- **`edge`: `Metrics.OnPublish` is called,** as OBSERVABILITY.md lists it: for each message the node hands to the transport, the births of `Rebirth` and the NDEATH of `Disconnect` and `Close` included, with the message type, how long the transport's `Publish` took and the error the publish returned, on the goroutine that published and with no lock of the node held. A message the node refuses before the transport is not reported. Before, `edge` never called it.
+
+### Documentation
+
+- API.md: the device IDs the device methods refuse, operations on their way to the transport at `Close`, the row of `Metrics.OnPublish` in the Callbacks table. ERRORS.md (`ErrClosed` of `edge`, `host` and `app`, `topic.ErrInvalidID` of `edge`), OBSERVABILITY.md (when `OnPublish` is called, with what), ARCHITECTURE.md ("Goroutines"), TESTING.md (L4 and the paragraph on `Close`). docs/CONFORMANCE.md: the device ID row is **Y**. Doc comments of the device methods, of `Close` in `edge`, `host` and `app`, and of `Metrics.OnPublish`; docs/api regenerated.
+
+### Tests
+
+- `edge`: the device IDs at the bounds of the rule (empty, one character, `/`, `+` and `#` alone and within an ID, ill-formed UTF-8, the replacement character, a 1024-byte ID) for the three device methods, with no message published and no `seq` taken when refused; `Metrics.OnPublish` for every message type, a rebirth, the transport's error and the NDEATH, not for messages refused before the transport, with no lock of the node held and the durations on the clock of a `testing/synctest` bubble; `Close` from `Metrics.OnPublish` during a rebirth; a publish waiting for the transport when `Close` is called.
+- `host`, `app`: the three commands waiting for the transport when `Close` is called, over a transport that ends them when it is disconnected, as `PahoTransport` does, and over one that ends them with their context only.
+
+---
+
 ## v0.7.0
 
 **Date:** 2026-11-16

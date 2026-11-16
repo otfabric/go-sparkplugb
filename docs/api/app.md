@@ -52,6 +52,9 @@ type Application struct {
 	// way are sent with it, so that Close ends them, and owned has them and
 	// the timers, so that Close waits for them.
 
+	// ended ends once Close has disconnected the transport (end): a command
+	// on its way is sent with a context that ends with it (publishCommand).
+
 }
 ```
 
@@ -70,6 +73,8 @@ func (a *Application) Close(ctx context.Context) error
 ```
 
 Close disconnects the application, as Disconnect does, and closes it: Connect then returns ErrClosed, and a Connect in progress ends with ErrClosed and leaves no connection up. The commands return an error that matches ErrClosed and ErrNotConnected; Disconnect returns nil.
+
+A command on its way to the transport when Close is called ends with it: once Close has disconnected the transport, the context the transport has for the command ends. An error the transport returns for it comes back wrapped, so that it matches ErrClosed as well as the transport's error (with PahoTransport, mqtt.ErrConnectionLost). Close does not wait for the command.
 
 Close returns once the goroutines the application started have ended: the rebirth requests on their way, which end with Close, and the timers of the application, which it stops. A callback the transport is running when Close is called (OnNodeData, say) may finish after Close has returned.
 

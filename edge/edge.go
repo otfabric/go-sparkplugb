@@ -205,7 +205,10 @@ type Node struct {
 	seqMu sync.Mutex
 	// lastTS is the payload timestamp of the last message handed to the
 	// transport, under seqMu: the next NBIRTH is stamped later (birthTime).
-	lastTS         uint64
+	lastTS uint64
+	// published are the messages handed to the transport under seqMu, for
+	// Metrics.OnPublish once seqMu is released (unlockSeq).
+	published      []publication
 	now            func() time.Time // the clock of birthTime
 	pubMu          sync.RWMutex     // held to publish; Disconnect takes it to end the session
 	rebirthMu      sync.Mutex
@@ -214,6 +217,15 @@ type Node struct {
 
 // transition is a change of the node's state, for StateHandler.
 type transition struct{ old, new State }
+
+// publication is a message handed to the transport, for Metrics.OnPublish:
+// its type, how long the transport's Publish took, and the error it
+// returned.
+type publication struct {
+	mt  topic.MessageType
+	d   time.Duration
+	err error
+}
 
 type Device struct {
 	ID      string
@@ -462,7 +474,7 @@ func (n *Node) abortConnect(ctx context.Context, err error) error {
 // until it is sent as data, and the caller may go on using its metrics.
 func (n *Node) PublishBirth(ctx context.Context, nodeMetrics []*pb.Payload_Metric) error {
 	n.seqMu.Lock()
-	defer n.seqMu.Unlock()
+	defer n.unlockSeq()
 	return n.publishBirth(ctx, nodeMetrics)
 }
 
@@ -546,11 +558,27 @@ func (n *Node) birthTime() uint64 {
 
 // PublishDeviceBirth publishes the DBIRTH of a device. It sets the timestamp
 // of a metric that has none, and keeps copies of the metrics for Rebirth, as
-// PublishBirth does.
+// PublishBirth does. A device ID that cannot be the device segment of a
+// topic, one that is empty, not valid UTF-8, or contains '/', '+' or '#',
+// returns topic.ErrInvalidID, and nothing is published; so it does for
+// PublishDeviceData and PublishDeviceDeath.
 func (n *Node) PublishDeviceBirth(ctx context.Context, deviceID string, metrics []*pb.Payload_Metric) error {
+	if err := checkDeviceID(deviceID); err != nil {
+		return err
+	}
 	n.seqMu.Lock()
-	defer n.seqMu.Unlock()
+	defer n.unlockSeq()
 	return n.publishDeviceBirth(ctx, deviceID, metrics)
+}
+
+// checkDeviceID returns topic.ErrInvalidID for a device ID that cannot be
+// the device segment of a topic, as New does for the group and edge node
+// IDs.
+func checkDeviceID(deviceID string) error {
+	if !validID(deviceID) {
+		return fmt.Errorf("sparkplugb: device ID %q: %w", deviceID, topic.ErrInvalidID)
+	}
+	return nil
 }
 
 func (n *Node) publishDeviceBirth(ctx context.Context, deviceID string, metrics []*pb.Payload_Metric) error {
@@ -616,7 +644,7 @@ func aliasConflict(owners map[uint64]string, owner string, metrics []*pb.Payload
 
 func (n *Node) PublishNodeData(ctx context.Context, metrics []*pb.Payload_Metric) error {
 	n.seqMu.Lock()
-	defer n.seqMu.Unlock()
+	defer n.unlockSeq()
 	return n.publishNodeData(ctx, metrics)
 }
 
@@ -640,9 +668,15 @@ func (n *Node) publishNodeData(ctx context.Context, metrics []*pb.Payload_Metric
 	return n.publish(ctx, topic.NDATA, "", p)
 }
 
+// PublishDeviceData publishes the DDATA of a device. A device ID that
+// PublishDeviceBirth refuses returns topic.ErrInvalidID, and nothing is
+// published.
 func (n *Node) PublishDeviceData(ctx context.Context, deviceID string, metrics []*pb.Payload_Metric) error {
+	if err := checkDeviceID(deviceID); err != nil {
+		return err
+	}
 	n.seqMu.Lock()
-	defer n.seqMu.Unlock()
+	defer n.unlockSeq()
 	return n.publishDeviceData(ctx, deviceID, metrics)
 }
 
@@ -668,9 +702,15 @@ func (n *Node) publishDeviceData(ctx context.Context, deviceID string, metrics [
 	return n.publish(ctx, topic.DDATA, deviceID, p)
 }
 
+// PublishDeviceDeath publishes the DDEATH of a device. A device ID that
+// PublishDeviceBirth refuses returns topic.ErrInvalidID, and nothing is
+// published.
 func (n *Node) PublishDeviceDeath(ctx context.Context, deviceID string) error {
+	if err := checkDeviceID(deviceID); err != nil {
+		return err
+	}
 	n.seqMu.Lock()
-	defer n.seqMu.Unlock()
+	defer n.unlockSeq()
 	return n.publishDeviceDeath(ctx, deviceID)
 }
 
@@ -705,7 +745,7 @@ func (n *Node) publishDeviceDeath(ctx context.Context, deviceID string) error {
 // rebirth that an NCMD asks for before the program's NBIRTH is not made.
 func (n *Node) Rebirth(ctx context.Context) error {
 	n.seqMu.Lock()
-	defer n.seqMu.Unlock()
+	defer n.unlockSeq()
 	n.mu.Lock()
 	if n.closed || n.state != Online {
 		n.mu.Unlock()
@@ -767,7 +807,9 @@ func (n *Node) Disconnect(ctx context.Context) error {
 			Type:       topic.NDEATH,
 			EdgeNodeID: n.cfg.EdgeNodeID,
 		}.String()
-		_ = n.transport.Publish(ctx, t, 1, false, ndeath)
+		start := time.Now()
+		err := n.transport.Publish(ctx, t, 1, false, ndeath)
+		n.reportPublish(publication{topic.NDEATH, time.Since(start), err})
 	}
 	err := n.transport.Disconnect(ctx)
 	n.notify() // once the connection has ended, as in abortConnect
@@ -780,13 +822,19 @@ func (n *Node) Disconnect(ctx context.Context) error {
 // operations return an error that matches ErrClosed, and ErrNotConnected or
 // ErrNoBirth; Disconnect returns nil.
 //
+// A publish on its way to the transport when Close is called ends with it:
+// the context the transport has for it ends, and Close waits for the
+// transport to return before it publishes the NDEATH. An error the
+// transport then returns comes back wrapped, so that it matches ErrClosed
+// as well as the transport's error.
+//
 // Close returns once the goroutines the node started have ended: a rebirth
 // an NCMD asked for, whose publishes end with Close, and a walk to another
 // server, which publishes its NDEATH first. Called from a callback that such
-// a goroutine runs (OnState during a walk), Close does not wait for that
-// one, which ends after the callback. A callback the transport is running
-// when Close is called (OnNodeCmd, OnDeviceCmd) may finish after Close has
-// returned.
+// a goroutine runs (OnState during a walk, Metrics.OnPublish during a walk
+// or a rebirth), Close does not wait for that one, which ends after the
+// callback. A callback the transport is running when Close is called
+// (OnNodeCmd, OnDeviceCmd) may finish after Close has returned.
 //
 // Close is safe to call more than once and from several goroutines: the
 // first call closes the node, the others return nil at once.
@@ -941,9 +989,39 @@ func (n *Node) publish(ctx context.Context, mt topic.MessageType, deviceID strin
 		return fmt.Errorf("sparkplugb: publish %s: %w", mt, err)
 	}
 	n.lastTS = p.GetTimestamp() // under seqMu, as every caller holds it
+
+	// The transport's context also ends with Close, which waits for this
+	// publish to return (pubMu) before it disconnects.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	defer context.AfterFunc(n.life, cancel)()
+	start := time.Now()
 	// An error of the transport does not tell whether the message went out:
 	// its seq stays taken, and a host that missed it asks for a rebirth.
-	return n.transport.Publish(ctx, t, 0, false, b)
+	err = n.transport.Publish(ctx, t, 0, false, b)
+	if err != nil && n.life.Err() != nil {
+		err = fmt.Errorf("%w: %w", ErrClosed, err)
+	}
+	n.published = append(n.published, publication{mt, time.Since(start), err})
+	return err
+}
+
+// unlockSeq releases seqMu, then reports the messages handed to the
+// transport under it to Metrics.OnPublish, in order, with none of the
+// node's locks held.
+func (n *Node) unlockSeq() {
+	published := n.published
+	n.published = nil
+	n.seqMu.Unlock()
+	for _, p := range published {
+		n.reportPublish(p)
+	}
+}
+
+// reportPublish calls Metrics.OnPublish with p. Called with none of the
+// node's locks held.
+func (n *Node) reportPublish(p publication) {
+	callback.Run(n.cfg.Logger, "Metrics.OnPublish", func() { n.cfg.Metrics.OnPublish(p.mt.String(), p.d, p.err) })
 }
 
 // unpublished gives back the seq of p, a message after the NBIRTH that was

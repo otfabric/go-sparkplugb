@@ -180,6 +180,116 @@ func TestHostCloseStopsTimersArmedAfterConnectionLost(t *testing.T) {
 	})
 }
 
+// errHeldCommand is what heldCommand returns for a command it held, once
+// the command's context has ended.
+var errHeldCommand = errors.New("held command ended")
+
+// heldCommand is the mock transport with every NCMD and DCMD publish held
+// until its context ends or, with endWithConnection, until the transport is
+// disconnected, which it reports as mqtt.ErrConnectionLost, as
+// PahoTransport does. A connection that ended before the context did is
+// what it reports.
+type heldCommand struct {
+	*mockTransport
+	endWithConnection bool
+	arrived           chan struct{}
+	disconnected      chan struct{}
+	once              sync.Once
+}
+
+func newHeldCommand(endWithConnection bool) *heldCommand {
+	return &heldCommand{
+		mockTransport:     newMockTransport(),
+		endWithConnection: endWithConnection,
+		arrived:           make(chan struct{}, 8),
+		disconnected:      make(chan struct{}),
+	}
+}
+
+func (h *heldCommand) Publish(ctx context.Context, t string, qos byte, retained bool, p []byte) error {
+	if !strings.Contains(t, "/NCMD/") && !strings.Contains(t, "/DCMD/") {
+		return h.mockTransport.Publish(ctx, t, qos, retained, p)
+	}
+	h.arrived <- struct{}{}
+	var ended <-chan struct{} // nil, never ready, unless endWithConnection
+	if h.endWithConnection {
+		ended = h.disconnected
+	}
+	select {
+	case <-ended:
+	case <-ctx.Done():
+	}
+	select {
+	case <-ended:
+		return fmt.Errorf("sparkplugb: publish: %w", mqtt.ErrConnectionLost)
+	default:
+		return fmt.Errorf("%w: %w", errHeldCommand, ctx.Err())
+	}
+}
+
+func (h *heldCommand) Disconnect(ctx context.Context) error {
+	h.once.Do(func() { close(h.disconnected) })
+	return h.mockTransport.Disconnect(ctx)
+}
+
+// Close contract 2: a command on its way to the transport when Close is
+// called ends with Close, and its error matches ErrClosed as well as the
+// transport's: mqtt.ErrConnectionLost from a transport that ends its
+// publishes when it is disconnected, as PahoTransport does, and its own
+// error from one that ends them with their context only. Before, the first
+// returned mqtt.ErrConnectionLost alone, and the second did not return.
+func TestHostCloseEndsCommandsInFlight(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		endWithConnection bool
+		want              error
+	}{
+		{"transport ends it with the connection", true, mqtt.ErrConnectionLost},
+		{"transport ends it with its context", false, errHeldCommand},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := newHeldCommand(tc.endWithConnection)
+			a, err := New(tr, testConfig())
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			if err := a.Connect(ctx); err != nil {
+				t.Fatal(err)
+			}
+			ms := []*pb.Payload_Metric{payload.RebirthMetric(true)}
+			ops := []struct {
+				name string
+				call func() error
+			}{
+				{"SendNodeCommand", func() error { return a.SendNodeCommand(ctx, "g1", "n1", ms) }},
+				{"SendDeviceCommand", func() error { return a.SendDeviceCommand(ctx, "g1", "n1", "d1", ms) }},
+				{"RequestRebirth", func() error { return a.RequestRebirth(ctx, "g1", "n1") }},
+			}
+			results := make([]chan error, len(ops))
+			for i, op := range ops {
+				results[i] = make(chan error, 1)
+				go func() { results[i] <- op.call() }()
+			}
+			for range ops {
+				wait(t, "a command reaching the transport", tr.arrived)
+			}
+
+			closed := make(chan error, 1)
+			go func() { closed <- a.Close(ctx) }()
+			for i, op := range ops {
+				err := wait(t, op.name+" in flight at Close", results[i])
+				if !errors.Is(err, ErrClosed) || !errors.Is(err, tc.want) {
+					t.Errorf("%s in flight at Close: %v, want ErrClosed and %v", op.name, err, tc.want)
+				}
+			}
+			if err := wait(t, "Close", closed); err != nil {
+				t.Errorf("Close: %v", err)
+			}
+		})
+	}
+}
+
 // L4: Close while a command waits for the transport. Close does not wait for
 // it, and publishes the STATE death; the command returns what the transport
 // returns, and the next one ErrClosed.
