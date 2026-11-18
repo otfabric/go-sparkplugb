@@ -26,9 +26,8 @@ jobs:
       release-name-prefix: go-sparkplugb
       test-exclude-regex: "(/example(s)?($|/)|/proto($|/))"
       update-major-tag: false
-      # The modules that require go-sparkplugb, built and tested against the
-      # candidate before it is tagged.
-      consumers: |
-        otfabric/sparkplugbctl
-        otfabric/sparkplugb-interop:own/go-sparkplugb
+      # No consumers input: a downstream module does not block a release.
+      # Its dependants (audit/dependency-graph.md in otfabric/engineering)
+      # are bumped to the new version after it is cut, each in its own
+      # pull request (standards/release.md).
     secrets: inherit
